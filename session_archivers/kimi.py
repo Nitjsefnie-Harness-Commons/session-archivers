@@ -89,7 +89,7 @@ def _machine_hash():
     mid = ''
     for p in ('/etc/machine-id', '/var/lib/dbus/machine-id'):
         try:
-            mid = Path(p).read_text().strip()
+            mid = Path(p).read_text(encoding='utf-8').strip()
         except OSError:
             mid = ''
         if mid:
@@ -614,11 +614,17 @@ def archive_user_history(client, remote, cutoff, dry_run, manifest):
 
 def main():
     for _stream in (sys.stdout, sys.stderr):
-        try:
-            _stream.reconfigure(encoding='utf-8', errors='replace')
-        except (AttributeError, ValueError, OSError):
-            pass  # not a reconfigurable stream (redirected/piped)
-    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+        # TextIO does not declare reconfigure, and a redirected or piped stream
+        # may genuinely not have it -- so this is a lookup rather than a call
+        # inside a bare except, which says the same thing to a reader and to a
+        # type checker.
+        reconfigure = getattr(_stream, 'reconfigure', None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding='utf-8', errors='replace')
+            except (ValueError, OSError):
+                pass  # not a reconfigurable stream (redirected/piped)
+    ap = argparse.ArgumentParser(description=(__doc__ or '').split('\n\n', maxsplit=1)[0])
     ap.add_argument('--days', type=int, default=DAYS,
                     help=f'retention threshold for delete (default {DAYS})')
     ap.add_argument('--dry-run', action='store_true',

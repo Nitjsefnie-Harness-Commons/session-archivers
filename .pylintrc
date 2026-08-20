@@ -15,6 +15,11 @@ disable=
     broad-exception-caught,
     broad-exception-raised,
     global-statement,
+# The single-instance lock imports msvcrt on Windows and fcntl
+# elsewhere, inside the helper that picks between them: importing
+# either at module scope makes the module unimportable on the other
+# platform, and both are platforms these archivers run on.
+    import-outside-toplevel,
 # parse_codex.py formats with % throughout, deliberately and consistently:
 # its output is column-aligned tables, and %-8s/%10s state a column width where
 # an f-string states padding arithmetic. Converting one file to f-strings to

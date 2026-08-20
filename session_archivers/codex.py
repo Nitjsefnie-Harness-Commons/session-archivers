@@ -56,7 +56,6 @@ import argparse
 import hashlib
 import json
 import lzma
-import os
 import socket
 import sys
 import time

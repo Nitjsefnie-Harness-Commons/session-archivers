@@ -32,6 +32,9 @@ jobs:
       - name: Install the build backend
         run: python -m pip install --upgrade pip build
 
+      - name: Install the package and its declared dependencies
+        run: pip install .
+
       - name: Run every suite before publishing anything
         env:
           PYTHONDONTWRITEBYTECODE: "1"

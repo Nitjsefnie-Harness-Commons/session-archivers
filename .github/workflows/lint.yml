@@ -37,7 +37,8 @@ jobs:
       - name: Install linters
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install -r requirements-dev.txt .
+          # `.` too: the linters resolve boto3 imports from the installed package.
 
       - name: pycodestyle
         run: git ls-files '*.py' | xargs pycodestyle
@@ -58,7 +59,8 @@ jobs:
       - name: Install linters
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install -r requirements-dev.txt .
+          # `.` too: the linters resolve boto3 imports from the installed package.
 
       - name: pylint
         run: git ls-files '*.py' | xargs pylint --rcfile=.pylintrc

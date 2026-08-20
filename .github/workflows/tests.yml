@@ -1,13 +1,15 @@
 name: tests
 
-# A matrix, because the parsers read paths and decode bytes on all three
+# A matrix, because the archivers walk paths and stat files on all three
 # platforms: Windows spellings of a path, the /var -> /private/var aliasing
-# macOS applies to temp dirs, and UTF-8 vs the ANSI code page all reach this
-# code. Being verified only on whichever box last ran them by hand is the
-# reason these moved out of the bundle at all.
+# macOS applies to temp dirs, and the single-instance lock itself (msvcrt on
+# Windows, fcntl elsewhere) all reach this code. Being verified only on
+# whichever box last ran them by hand is the reason these moved out of the
+# bundle at all.
 #
-# No install step: the parsers are stdlib-only on purpose, since they run
-# inside hooks on every tool call.
+# The dependencies come from pyproject rather than a pinned list: boto3 is the
+# package's own declared requirement, and installing it any other way here
+# would let the two disagree.
 
 on:
   push:
@@ -41,7 +43,12 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Run every parser suite
+      - name: Install the package and its declared dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+
+      - name: Run every archiver suite
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python run_tests.py
@@ -70,9 +77,9 @@ jobs:
           python -m venv "$RUNNER_TEMP/probe"
           "$RUNNER_TEMP/probe/bin/pip" install dist/*.whl
           cd "$RUNNER_TEMP"
-          "$RUNNER_TEMP/probe/bin/parse-session" --version
-          "$RUNNER_TEMP/probe/bin/parse-wire" --version
-          "$RUNNER_TEMP/probe/bin/parse-codex" --version
+          "$RUNNER_TEMP/probe/bin/archive-claude-sessions" --help
+          "$RUNNER_TEMP/probe/bin/archive-kimi-sessions" --help
+          "$RUNNER_TEMP/probe/bin/archive-codex-sessions" --help
 
       - uses: actions/upload-artifact@v4
         with:

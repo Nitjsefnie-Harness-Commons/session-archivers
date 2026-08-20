@@ -56,10 +56,10 @@ that silently uploads nowhere is worse than one that refuses to start.
 
 ## Where this came from
 
-Extracted from [`agent-harness-bundle`](https://github.com/Nitjsefnie/agent-harness-bundle),
-where they ran only on whichever machine last exercised them by hand. Here CI
-runs the suite on every push. The bundle keeps thin wrappers at the documented
-paths, so every schedule and doc naming one of them still works.
+Extracted from a private agent-harness bundle, where they ran only on whichever
+machine last exercised them by hand. Here CI runs the suite on every push. That
+bundle keeps thin wrappers at the documented script paths, so every schedule and
+doc naming one of them still works.
 
 ## License
 

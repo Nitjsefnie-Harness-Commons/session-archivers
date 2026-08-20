@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "session-archivers"
+dynamic = ["version"]
+description = "R2 session archivers for Claude Code, Kimi and Codex agent sessions"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Nitjsefnie" }]
+keywords = ["claude", "codex", "kimi", "archive", "r2", "agents"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Archiving",
+]
+# boto3 is the one real dependency: the destination is S3-compatible object
+# storage and hand-rolling SigV4 to avoid it would be a worse trade. Everything
+# else here is stdlib, because these run from cron and Task Scheduler where a
+# missing import is a 3am failure nobody is watching.
+dependencies = ["boto3"]
+
+[project.urls]
+Homepage = "https://github.com/Nitjsefnie-Harness-Commons/session-archivers"
+Issues = "https://github.com/Nitjsefnie-Harness-Commons/session-archivers/issues"
+
+[project.scripts]
+archive-claude-sessions = "session_archivers.claude:main"
+archive-kimi-sessions = "session_archivers.kimi:main"
+archive-codex-sessions = "session_archivers.codex:main"
+
+[tool.setuptools]
+packages = ["session_archivers"]
+
+[tool.setuptools.dynamic]
+# Single source of truth: the wheel and the package can never disagree.
+version = { attr = "session_archivers.__version__" }

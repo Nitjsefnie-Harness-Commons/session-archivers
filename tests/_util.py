@@ -69,6 +69,96 @@ def transcripts(limit=None, min_size=0):
     return found[-limit:] if limit else found
 
 
+# pylint: disable=too-few-public-methods
+# The stubs below stand in for boto3 objects that genuinely have one
+# method each -- a response Body you read(), a paginator you paginate().
+# A second method would mean stubbing an operation nothing calls.
+class _Body:
+    """What boto3 hands back under the 'Body' key: a stream you read once."""
+
+    def __init__(self, data):
+        self._data = data
+
+    def read(self):
+        return self._data
+
+
+class _Paginator:
+    def __init__(self, client, page_size):
+        self._client = client
+        self._page_size = page_size
+
+    def paginate(self, **kwargs):
+        if kwargs.get("Bucket") != self._client.bucket:
+            raise AssertionError(f"listed the wrong bucket: {kwargs!r}")
+        keys = sorted(self._client.objects)
+        if not keys:
+            # A real paginator yields one page with no Contents key at all
+            # for an empty bucket, which is the branch inventory() guards.
+            yield {}
+            return
+        for start in range(0, len(keys), self._page_size):
+            chunk = keys[start:start + self._page_size]
+            yield {"Contents": [{"Key": k, "Size": len(self._client.objects[k])}
+                                for k in chunk]}
+
+
+class FakeS3:
+    """In-memory stand-in for the boto3 S3 client `store.client()` builds.
+
+    Deliberately only the four operations the archivers call. A stub that
+    accepted anything would let a call to a method R2 does not have pass in
+    the suite and fail in production. It also asserts on the bucket it is
+    handed, so a test that expected one archiver's bucket and got another's
+    fails here rather than passing quietly.
+
+    `fail_puts` / `fail_deletes` hold keys whose operation raises, so the
+    error branches -- which log and count a failure -- are reachable.
+    """
+
+    def __init__(self, bucket="test-bucket", page_size=2):
+        self.bucket = bucket
+        self.objects = {}
+        self.puts = []
+        self.deletes = []
+        self.fail_puts = set()
+        self.fail_deletes = set()
+        self._page_size = page_size
+
+    def _check_bucket(self, bucket):
+        if bucket != self.bucket:
+            raise AssertionError(f"wrong bucket: {bucket!r}")
+
+    def get_object(self, Bucket, Key):
+        self._check_bucket(Bucket)
+        if Key not in self.objects:
+            # R2 raises a generic ClientError here, not S3's NoSuchKey -- the
+            # code only ever catches Exception, so the type is free.
+            raise KeyError(Key)
+        return {"Body": _Body(self.objects[Key])}
+
+    def put_object(self, Bucket, Key, Body):
+        self._check_bucket(Bucket)
+        if Key in self.fail_puts:
+            raise RuntimeError(f"put refused: {Key}")
+        if not isinstance(Body, bytes):
+            raise AssertionError(f"Body must be bytes, got {type(Body).__name__}")
+        self.objects[Key] = Body
+        self.puts.append(Key)
+
+    def delete_object(self, Bucket, Key):
+        self._check_bucket(Bucket)
+        if Key in self.fail_deletes:
+            raise RuntimeError(f"delete refused: {Key}")
+        self.objects.pop(Key, None)
+        self.deletes.append(Key)
+
+    def get_paginator(self, name):
+        if name != "list_objects_v2":
+            raise AssertionError(f"unexpected paginator: {name!r}")
+        return _Paginator(self, self._page_size)
+
+
 class Skipped(Exception):
     """Raised by a test that cannot hold on this platform."""
 

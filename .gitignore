@@ -58,11 +58,15 @@
 !/session_archivers/claude.py
 !/session_archivers/codex.py
 !/session_archivers/kimi.py
+!/session_archivers/runtime.py
 !/session_archivers/settings.py
+!/session_archivers/store.py
 
 # ─── tests ───
 !/tests/
 !/tests/_util.py
+!/tests/test_archive_walks.py
 !/tests/test_archiver_behaviour.py
 !/tests/test_package_contract.py
-!/tests/test_r2_paths.py
+!/tests/test_runtime.py
+!/tests/test_store.py

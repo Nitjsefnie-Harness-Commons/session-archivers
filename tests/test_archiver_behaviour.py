@@ -1,35 +1,28 @@
-"""Behaviour suite for the three archivers.
+"""What each archiver decides on its own, before anything is uploaded.
 
-The existing suite (test_package_contract.py) reads the package as TEXT and
-parses its ASTs — it asserts no credential literal ships and that the wheel
-promises what it promises, and it deliberately never imports the code. That
-is a real check, but it means nothing here has ever been executed, so line
-coverage sat at 1%.
-
-This one executes. It stays off the network entirely: every function tested
-below is either pure, or filesystem-only against a temp dir. Nothing here
-constructs an R2 client.
-
-The two areas are chosen rather than swept:
+The shared halves are tested where they live: the destination in
+test_store.py, the host scaffolding in test_runtime.py, the per-archiver
+walks in test_archive_walks.py. What is left here is the reasoning no other
+archiver shares.
 
   * KEY CONSTRUCTION decides where a session is filed in object storage,
-    permanently. ingest reads the project and the thread id straight back
-    out of the key, so a wrong key is wrong for the life of the object.
+    permanently. Ingest reads the project and the thread id straight back out
+    of the key, so a wrong key is wrong for the life of the object. Codex is
+    the interesting case: its on-disk layout carries no project at all, so
+    the archiver derives one.
 
-  * DELETION decides which local files get removed. `is_old` is the entire
-    predicate behind `cleanup_local`, and an off-by-one there deletes
-    someone's session history.
+  * SETTINGS RESOLUTION decides which account and which bucket an archiver
+    talks to, and refuses to run rather than guess. Every archiver reads its
+    own R2_BUCKET_* through this.
+
+Nothing here touches the network, and nothing here needs a client.
 """
 # pylint: disable=protected-access
-# These archivers are scripts, not a library: their helpers are
-# module-private because nothing outside imports them, not because
-# they are implementation detail behind a public API. `_is_text`
-# picks a Content-Type and `is_old` decides what gets deleted —
-# testing them through some public wrapper would mean testing an
-# R2 upload to test a suffix check.
+# `_file_env` is private because it is a cache, not because the resolution
+# order it implements is an implementation detail -- that order IS the
+# contract, and it is what these tests pin.
 import json
 import os
-import time
 from pathlib import Path
 
 import _util
@@ -37,35 +30,8 @@ import _util
 # Imported as a PACKAGE, not by path: these modules use relative imports
 # (`from .settings import ...`), which have no parent package when a file
 # is loaded standalone. See _util.load_package_module.
-_CLAUDE = _util.load_package_module("claude")
 _CODEX = _util.load_package_module("codex")
-_KIMI = _util.load_package_module("kimi")
 _SETTINGS = _util.load_package_module("settings")
-
-_MODULES = (("claude", _CLAUDE), ("codex", _CODEX), ("kimi", _KIMI))
-
-
-# --- content-type classification -------------------------------------------
-# _is_text picks the Content-Type an object is uploaded with. Getting it
-# wrong makes a transcript download as a binary blob.
-
-def test_is_text_accepts_the_suffixes_the_archivers_upload(tmp):
-    for name, mod in _MODULES:
-        for key in ("sessions/a/wire.jsonl", "x.txt", "y.json", "z.js"):
-            assert mod._is_text(key), f"{name}: {key} should be text"
-
-
-def test_is_text_rejects_everything_else(tmp):
-    for name, mod in _MODULES:
-        for key in ("archive.tar.gz", "image.png", "wire.jsonl.xz", "noext"):
-            assert not mod._is_text(key), f"{name}: {key} should not be text"
-
-
-def test_is_text_is_suffix_anchored_not_substring(tmp):
-    """`.jsonl` inside a name is not a `.jsonl` file."""
-    for name, mod in _MODULES:
-        assert not mod._is_text("a.jsonl.bak"), name
-        assert not mod._is_text("notes-about-json"), name
 
 
 # --- project hashing --------------------------------------------------------
@@ -217,112 +183,6 @@ def test_read_session_meta_only_reads_the_head(tmp):
     assert _CODEX.read_session_meta(path) is None
 
 
-# --- deletion predicate ------------------------------------------------------
-# is_old is the entire predicate behind cleanup_local. Everything it returns
-# True for is deleted.
-
-def test_is_old_is_true_only_past_the_cutoff(tmp):
-    path = Path(tmp) / "f"
-    path.write_text("x", encoding="utf-8")
-    old = time.time() - 10_000
-    os.utime(path, (old, old))
-
-    for name, mod in _MODULES:
-        assert mod.is_old(path, time.time()) is True, name
-        assert mod.is_old(path, old - 1) is False, name
-
-
-def test_is_old_says_no_for_a_missing_path(tmp):
-    """A file that vanished between listing and checking is not 'old'.
-
-    Returning True there would send `cleanup_local` on to unlink a path it
-    has already lost track of.
-    """
-    for name, mod in _MODULES:
-        assert mod.is_old(Path(tmp) / "gone", time.time()) is False, name
-
-
-def _sandboxed_claude_dirs(tmp):
-    """Every directory `cleanup_local` walks, redirected under `tmp`.
-
-    ALL of them, not just the one under test. `cleanup_local` sweeps
-    DEBUG_DIR, FILE_HISTORY_DIR and TELEMETRY_DIR in one pass, and the tests
-    below call it with a cutoff of "now" -- so any of the three left pointed
-    at the real ~/.claude deletes the whole of that directory on the machine
-    running the suite, whatever its age. LOG_FILE is in here for the same
-    reason: `cleanup_local` logs, and the default appends to the live
-    cleanup-sessions.log.
-    """
-    root = Path(tmp) / "claude-home"
-    return {
-        "DEBUG_DIR": root / "debug",
-        "FILE_HISTORY_DIR": root / "file-history",
-        "TELEMETRY_DIR": root / "telemetry",
-        "LOG_FILE": root / "cleanup-sessions.log",
-    }
-
-
-def test_cleanup_local_dry_run_deletes_nothing(tmp):
-    """The flag that makes this safe to run for a look."""
-    dirs = _sandboxed_claude_dirs(tmp)
-    dirs["DEBUG_DIR"].mkdir(parents=True)
-    victim = dirs["DEBUG_DIR"] / "old.log"
-    victim.write_text("x", encoding="utf-8")
-    old = time.time() - 10_000
-    os.utime(victim, (old, old))
-
-    saved = {k: getattr(_CLAUDE, k) for k in dirs}
-    try:
-        for key, value in dirs.items():
-            setattr(_CLAUDE, key, value)
-        _CLAUDE.cleanup_local(time.time(), dry_run=True)
-        assert victim.exists(), "dry run deleted a file"
-
-        _CLAUDE.cleanup_local(time.time(), dry_run=False)
-        assert not victim.exists(), "non-dry run left the file"
-    finally:
-        for key, value in saved.items():
-            setattr(_CLAUDE, key, value)
-
-
-def test_cleanup_local_spares_recent_files(tmp):
-    dirs = _sandboxed_claude_dirs(tmp)
-    dirs["DEBUG_DIR"].mkdir(parents=True)
-    keep = dirs["DEBUG_DIR"] / "fresh.log"
-    keep.write_text("x", encoding="utf-8")
-
-    saved = {k: getattr(_CLAUDE, k) for k in dirs}
-    try:
-        for key, value in dirs.items():
-            setattr(_CLAUDE, key, value)
-        _CLAUDE.cleanup_local(time.time() - 10_000, dry_run=False)
-        assert keep.exists(), "deleted a file newer than the cutoff"
-    finally:
-        for key, value in saved.items():
-            setattr(_CLAUDE, key, value)
-
-
-# --- machine identity --------------------------------------------------------
-
-def test_machine_hash_is_stable_and_opaque(tmp):
-    for name, mod in _MODULES:
-        first = mod._machine_hash()
-        assert first == mod._machine_hash(), name
-        assert len(first) == 16, name
-        # It is a hash of the machine id, so the id must not be readable
-        # from it — this is why manifests can be named by it in a shared
-        # bucket.
-        assert all(c in "0123456789abcdef" for c in first), name
-
-
-def test_manifest_key_is_per_machine(tmp):
-    for name, mod in _MODULES:
-        key = mod.manifest_key()
-        assert key.startswith("manifests/"), name
-        assert key.endswith(".json"), name
-        assert mod._machine_hash() in key, name
-
-
 # --- settings resolution -----------------------------------------------------
 
 def test_setting_prefers_the_environment(tmp, ):
@@ -424,24 +284,6 @@ def test_non_string_settings_values_are_ignored(tmp):
     finally:
         _SETTINGS.SETTINGS_DIR, _SETTINGS.LEGACY_SETTINGS_DIR = orig_dir, orig_legacy
         _SETTINGS._file_env(force=True)
-
-
-# --- locking -----------------------------------------------------------------
-
-def test_acquire_lock_is_exclusive(tmp):
-    """Two archivers on one machine must not upload concurrently."""
-    lock = Path(tmp) / "archiver.lock"
-    original = _CLAUDE.LOCK_FILE
-    try:
-        _CLAUDE.LOCK_FILE = lock
-        first = _CLAUDE.acquire_lock()
-        if first is None:
-            _util.skip("advisory locking unavailable on this platform")
-        second = _CLAUDE.acquire_lock()
-        assert second is None, "a second holder acquired the same lock"
-        first.close()
-    finally:
-        _CLAUDE.LOCK_FILE = original
 
 
 if __name__ == "__main__":

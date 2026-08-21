@@ -4,10 +4,26 @@ R2 archivers for the session transcripts of three agent harnesses: Claude Code,
 Kimi and Codex.
 
 Each harness stores sessions differently — Claude by project directory, Kimi by
-working directory, Codex in date buckets — so these are three archivers rather
-than one parameterised routine. What they share is the destination: one bucket
-layout, one manifest format, one single-instance lock, and one compression
-policy, so a dashboard reads all three the same way.
+working directory, Codex in date buckets — so the three walks are three modules
+rather than one parameterised routine. Each also has its own bucket:
+`R2_BUCKET_CLAUDE`, `R2_BUCKET_KIMI` and `R2_BUCKET_CODEX` are three separate
+destinations and nothing merges them.
+
+What the three share is the *way* each one is written to — one key layout, one
+manifest format, one single-instance lock, one compression policy — so a
+dashboard reads all three the same way. Since 1.1.0 that half is two modules
+instead of three copies of itself:
+
+| Module | What it owns |
+| --- | --- |
+| `store.py` | The destination. Compression policy, per-machine manifest, bucket inventory, the upload forms. Takes the bucket name as an argument. |
+| `runtime.py` | The host. Logging, the single-instance lock, the retention predicate, the local scratch sweeps. |
+| `claude.py` / `kimi.py` / `codex.py` | One tree walk each, and the keys it files things under. |
+
+The copies were the right call while these were standalone scripts, copied onto
+a machine one file at a time with nothing else present. They install as one
+package now, so three copies bought nothing but three places for a fix to land
+in two of.
 
 ## Install
 
@@ -16,9 +32,9 @@ it, and checking against it is the point: fetching "the newest release" is
 otherwise a promise about a URL, not about the artifact CI built.
 
 ```sh
-gh release download v1.0.0 --repo Nitjsefnie-Harness-Commons/session-archivers
+gh release download v1.1.0 --repo Nitjsefnie-Harness-Commons/session-archivers
 sha256sum -c SHA256SUMS
-pip install ./session_archivers-1.0.0-py3-none-any.whl
+pip install ./session_archivers-1.1.0-py3-none-any.whl
 ```
 
 Three console scripts:
@@ -92,24 +108,28 @@ python3 -m coverage combine && python3 -m coverage report
 ```
 
 Each suite in its own subprocess, because that is what `run_tests.py` does.
-Gated at **92%**, a ratchet under the current 93.9%, not a target.
+Gated at **94%**, a ratchet under the current 95.4%, not a target.
 
-Three suites, and only two of them move that number.
-`test_package_contract.py` reads the package as TEXT and parses its ASTs —
-it asserts no credential literal ships and that the wheel promises what it
-promises — and deliberately never imports the code, so it contributes
-nothing to line coverage. `test_archiver_behaviour.py` executes what needs
-no client at all: key construction, the deletion predicate, content-type
-classification, settings resolution. `test_r2_paths.py` executes everything
-downstream of `_client()` — the manifest round-trip, the bucket inventory,
-the compression policy, the three archive walks and the `main()` drivers —
-against an in-memory stub answering the four S3 calls the archivers actually
-make.
+Five suites, one per seam, and only four of them move that number:
 
-The whole suite stays off the network, and no real R2 client is constructed
-anywhere in it. What is left uncovered is the Windows `msvcrt` leg of the
-single-instance lock, the `boto3.client(...)` call itself, and the handful of
-`OSError` branches that need an unwritable filesystem to reach.
+| Suite | What it covers |
+| --- | --- |
+| `test_store.py` | The destination — compression policy, manifest round-trip, inventory paging, the upload and stale-twin forms, credential resolution. |
+| `test_runtime.py` | The host — the logger, the lock's exclusivity and release, the retention predicate, the local sweeps. |
+| `test_archive_walks.py` | The three walks and their `main()` drivers — which files each archiver finds, which key it files them under, what it counts, what it will delete. |
+| `test_archiver_behaviour.py` | What no other archiver shares: Codex key construction, and settings resolution. |
+| `test_package_contract.py` | Reads the package as TEXT and parses its ASTs — no credential literal ships, the wheel promises what it promises. Deliberately never imports the code, so it contributes nothing to line coverage. |
+
+The whole suite stays off the network. `store.client()` is the only place a
+real boto3 client is built and nothing in the suite calls it: every test
+constructs a `Store` around the in-memory stub in `tests/_util.py`, which
+answers the four S3 operations the archivers actually use and raises on
+anything else — including a request against a bucket other than the one the
+Store was given.
+
+What is left uncovered is the Windows `msvcrt` leg of the single-instance
+lock, the `boto3.client(...)` call itself, and the handful of `OSError`
+branches that need an unwritable filesystem to reach.
 
 ### CI
 

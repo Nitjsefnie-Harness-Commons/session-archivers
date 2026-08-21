@@ -36,6 +36,19 @@ jobs:
       - name: Install the build backend
         run: python -m pip install --upgrade pip build
 
+      - name: Install the package and its declared dependencies
+        # For the SUITES below, not for the build: they import the package,
+        # which imports boto3, and without this every one of them dies at
+        # collection with ModuleNotFoundError. This step was dropped as
+        # collateral in e042a99 (a commit about pinning actions), on the
+        # since-falsified premise that the suite "deliberately never imports
+        # the code it checks" — test_package_contract.py has always imported
+        # it, to prove importing demands no credentials. Nothing caught the
+        # regression because the tag that would have run this workflow was
+        # pushed with GITHUB_TOKEN, which does not trigger workflows, so
+        # release.yml did not run at all between then and v1.1.0.
+        run: pip install .
+
       - name: Run every suite before publishing anything
         env:
           PYTHONDONTWRITEBYTECODE: "1"

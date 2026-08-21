@@ -32,9 +32,9 @@ it, and checking against it is the point: fetching "the newest release" is
 otherwise a promise about a URL, not about the artifact CI built.
 
 ```sh
-gh release download v1.1.0 --repo Nitjsefnie-Harness-Commons/session-archivers
+gh release download v1.1.1 --repo Nitjsefnie-Harness-Commons/session-archivers
 sha256sum -c SHA256SUMS
-pip install ./session_archivers-1.1.0-py3-none-any.whl
+pip install ./session_archivers-1.1.1-py3-none-any.whl
 ```
 
 Three console scripts:

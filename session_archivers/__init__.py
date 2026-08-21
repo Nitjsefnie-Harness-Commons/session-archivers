@@ -24,4 +24,4 @@ They were extracted from the agent-harness-bundle, where they ran only on
 whichever machine last exercised them by hand. Here CI runs their suite on
 every push, across the operating systems they actually run on.
 """
-__version__ = "1.1.0"
+__version__ = "1.1.1"

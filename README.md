@@ -92,16 +92,24 @@ python3 -m coverage combine && python3 -m coverage report
 ```
 
 Each suite in its own subprocess, because that is what `run_tests.py` does.
-Gated at **25%**, a ratchet under the current 27.5%, not a target.
+Gated at **92%**, a ratchet under the current 93.9%, not a target.
 
-That number is low for a reason worth knowing. `test_package_contract.py`
-reads the package as TEXT and parses its ASTs — it asserts no credential
-literal ships and that the wheel promises what it promises — and
-deliberately never imports the code, so it contributes nothing to line
-coverage. `test_archiver_behaviour.py` is the one that executes, and it
-stays off the network: everything it touches is pure or filesystem-only
-against a temp dir. The uncovered remainder is overwhelmingly the R2 upload
-paths, which cannot be exercised without a bucket.
+Three suites, and only two of them move that number.
+`test_package_contract.py` reads the package as TEXT and parses its ASTs —
+it asserts no credential literal ships and that the wheel promises what it
+promises — and deliberately never imports the code, so it contributes
+nothing to line coverage. `test_archiver_behaviour.py` executes what needs
+no client at all: key construction, the deletion predicate, content-type
+classification, settings resolution. `test_r2_paths.py` executes everything
+downstream of `_client()` — the manifest round-trip, the bucket inventory,
+the compression policy, the three archive walks and the `main()` drivers —
+against an in-memory stub answering the four S3 calls the archivers actually
+make.
+
+The whole suite stays off the network, and no real R2 client is constructed
+anywhere in it. What is left uncovered is the Windows `msvcrt` leg of the
+single-instance lock, the `boto3.client(...)` call itself, and the handful of
+`OSError` branches that need an unwritable filesystem to reach.
 
 ### CI
 

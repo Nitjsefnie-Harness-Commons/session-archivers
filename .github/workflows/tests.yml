@@ -197,8 +197,8 @@ jobs:
 
       - name: Coverage gate
         if: ${{ !cancelled() && steps.measure.conclusion == 'success' }}
-        # A RATCHET, not a target. 25 sits just under the 27.5%
-        # measured when this landed, so ordinary churn stays green and a real
-        # regression goes red. Raise the floor by hand as coverage climbs —
-        # never lower it to make a red build green.
-        run: python -m coverage report --fail-under=25 --precision=1
+        # A RATCHET, not a target. 92 sits just under the 93.9%
+        # measured when the R2-path suite landed, so ordinary churn stays
+        # green and a real regression goes red. Raise the floor by hand as
+        # coverage climbs — never lower it to make a red build green.
+        run: python -m coverage report --fail-under=92 --precision=1

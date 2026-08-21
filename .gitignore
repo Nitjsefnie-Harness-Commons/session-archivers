@@ -65,3 +65,4 @@
 !/tests/_util.py
 !/tests/test_archiver_behaviour.py
 !/tests/test_package_contract.py
+!/tests/test_r2_paths.py

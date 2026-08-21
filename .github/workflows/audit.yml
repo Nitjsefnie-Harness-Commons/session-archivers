@@ -1,0 +1,103 @@
+name: audit
+
+# Dependency vulnerability gate: pip-audit resolves each requirements file
+# to its full transitive tree and checks every resolved version against the
+# PyPI advisory database and OSV.
+#
+# This repo has BOTH a runtime dependency (boto3, declared in
+# pyproject.toml rather than a requirements file) and a pinned toolchain,
+# so the audit takes two passes — see the step below for why they cannot be
+# one invocation.
+
+on:
+  push:
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+  schedule:
+    - cron: '12 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in this workflow pushes. Leaving the job token in
+          # .git/config lets any later step — or anything a dependency
+          # pulls in — reuse it.
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit==2.10.1
+
+      - name: Audit dependencies
+        # TWO passes, because pip-audit's project mode and `-r` are mutually
+        # exclusive and this repo needs both:
+        #
+        #   `.`  reads pyproject.toml, so it covers boto3 — the
+        #        dependency that actually ships to anyone who installs this.
+        #        A `-r requirements-dev.txt`-only audit would have covered
+        #        the linters and missed it entirely.
+        #
+        #   `-r` covers the toolchain, which runs in CI holding the
+        #        repository token. A compromised linter is a supply-chain
+        #        problem even though it never ships.
+        #
+        # Resolution is the point in both: a declared dependency drags in a
+        # tree of its own, and that is where an advisory lands.
+        #
+        # THE RETRY IS NARROW ON PURPOSE. pip-audit resolves over the
+        # network, and a reset connection produces the same exit status as a
+        # real finding. A blanket retry would re-run a genuine vulnerability
+        # three times before reporting it, and a gate that goes red for
+        # reasons unrelated to its subject is one people learn to ignore. So
+        # this retries ONLY on a transport error and reports anything else
+        # immediately and verbatim.
+        run: |
+          audit() {
+            for attempt in 1 2 3; do
+              if pip-audit --progress-spinner off "$@" > audit.out 2>&1; then
+                cat audit.out
+                return 0
+              fi
+              if grep -qiE 'connection (aborted|reset|error)|read timed out|temporary failure in name resolution' audit.out; then
+                echo "attempt $attempt: transport failure talking to PyPI, retrying"
+                tail -n 5 audit.out
+                sleep $(( attempt * 15 ))
+                continue
+              fi
+              echo "pip-audit reported findings for: $*" >&2
+              cat audit.out >&2
+              return 1
+            done
+            echo "pip-audit could not reach PyPI after 3 attempts:" >&2
+            cat audit.out >&2
+            return 1
+          }
+
+          echo "::group::runtime dependencies (pyproject.toml)"
+          audit .
+          echo "::endgroup::"
+
+          echo "::group::toolchain"
+          audit -r requirements-dev.txt
+          echo "::endgroup::"

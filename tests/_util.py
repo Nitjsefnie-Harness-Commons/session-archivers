@@ -7,8 +7,10 @@ CI, and a POSIX-only assumption here would be a platform failure reported as a
 test failure.
 """
 import glob
+import importlib
 import importlib.util
 import os
+import sys
 import tempfile
 import traceback
 from pathlib import Path
@@ -34,6 +36,24 @@ def load(path, name=None):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def load_package_module(name):
+    """Import `session_archivers.<name>` as part of its package.
+
+    `load()` above deliberately imports by PATH, so a broken __init__ cannot
+    disguise a parser defect as an ImportError. That is not available here:
+    these modules do `from .settings import ...`, and a relative import has
+    no parent package when the file is loaded standalone.
+
+    So this one goes through the package, with the repo root on sys.path so
+    it resolves from the checkout rather than from whatever happens to be
+    installed.
+    """
+    root = str(_PROJECT_ROOT)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    return importlib.import_module(f"session_archivers.{name}")
 
 
 def transcripts(limit=None, min_size=0):

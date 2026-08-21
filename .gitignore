@@ -35,6 +35,7 @@
 !/pyproject.toml
 !/pyrightconfig.json
 !/requirements-dev.txt
+!/requirements-test.txt
 !/run_tests.py
 !/setup.cfg
 
@@ -62,4 +63,5 @@
 # ─── tests ───
 !/tests/
 !/tests/_util.py
+!/tests/test_archiver_behaviour.py
 !/tests/test_package_contract.py

@@ -82,19 +82,32 @@ a brand-new module is untracked until you stage it, and pylint would
 otherwise report a clean run over every file except the one you just
 wrote.
 
-There is deliberately **no coverage gate** here. The suite is a
-source-contract suite: it reads the package as text and parses its ASTs —
-asserting that no credential literal ships, that the three archivers exist,
-and that the wheel needs no bundle around it — and never imports the code
-it checks. Line coverage measures 1.0% and always will. Gating on that
-number would be theatre, and printing it every run would teach people to
-ignore the column.
+Coverage:
+
+```sh
+for s in tests/test_*.py; do
+  python3 -m coverage run --parallel-mode --source=session_archivers "$s"
+done
+python3 -m coverage combine && python3 -m coverage report
+```
+
+Each suite in its own subprocess, because that is what `run_tests.py` does.
+Gated at **25%**, a ratchet under the current 27.5%, not a target.
+
+That number is low for a reason worth knowing. `test_package_contract.py`
+reads the package as TEXT and parses its ASTs — it asserts no credential
+literal ships and that the wheel promises what it promises — and
+deliberately never imports the code, so it contributes nothing to line
+coverage. `test_archiver_behaviour.py` is the one that executes, and it
+stays off the network: everything it touches is pure or filesystem-only
+against a temp dir. The uncovered remainder is overwhelmingly the R2 upload
+paths, which cannot be exercised without a bucket.
 
 ### CI
 
 | Workflow | What it does |
 | --- | --- |
-| `tests` | `run_tests.py` across 3 OSes × 3 Pythons. No coverage job — see above. |
+| `tests` | `run_tests.py` across 3 OSes × 3 Pythons, plus a single-run coverage job — the matrix would otherwise report the same coverage number nine times. |
 | `lint` / `types` | pylint + pycodestyle, and pyright. |
 | `codeql` | Security analysis (Python only — no JS here). Findings go to the Security tab, never the build. Weekly cron on top of push, because a query published today would otherwise only ever run against files touched after it shipped. |
 | `audit` | `pip-audit` over both requirements files, resolving the full transitive tree. **Daily** cron: this answers "is a version we froze months ago still safe", and that answer changes with no commit here to hang it on. |

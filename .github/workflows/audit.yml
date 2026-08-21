@@ -99,5 +99,5 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::toolchain"
-          audit -r requirements-dev.txt
+          audit -r requirements-dev.txt -r requirements-test.txt
           echo "::endgroup::"

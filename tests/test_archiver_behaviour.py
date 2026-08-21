@@ -242,40 +242,64 @@ def test_is_old_says_no_for_a_missing_path(tmp):
         assert mod.is_old(Path(tmp) / "gone", time.time()) is False, name
 
 
+def _sandboxed_claude_dirs(tmp):
+    """Every directory `cleanup_local` walks, redirected under `tmp`.
+
+    ALL of them, not just the one under test. `cleanup_local` sweeps
+    DEBUG_DIR, FILE_HISTORY_DIR and TELEMETRY_DIR in one pass, and the tests
+    below call it with a cutoff of "now" -- so any of the three left pointed
+    at the real ~/.claude deletes the whole of that directory on the machine
+    running the suite, whatever its age. LOG_FILE is in here for the same
+    reason: `cleanup_local` logs, and the default appends to the live
+    cleanup-sessions.log.
+    """
+    root = Path(tmp) / "claude-home"
+    return {
+        "DEBUG_DIR": root / "debug",
+        "FILE_HISTORY_DIR": root / "file-history",
+        "TELEMETRY_DIR": root / "telemetry",
+        "LOG_FILE": root / "cleanup-sessions.log",
+    }
+
+
 def test_cleanup_local_dry_run_deletes_nothing(tmp):
     """The flag that makes this safe to run for a look."""
-    debug = Path(tmp) / "debug"
-    debug.mkdir()
-    victim = debug / "old.log"
+    dirs = _sandboxed_claude_dirs(tmp)
+    dirs["DEBUG_DIR"].mkdir(parents=True)
+    victim = dirs["DEBUG_DIR"] / "old.log"
     victim.write_text("x", encoding="utf-8")
     old = time.time() - 10_000
     os.utime(victim, (old, old))
 
-    original = _CLAUDE.DEBUG_DIR
+    saved = {k: getattr(_CLAUDE, k) for k in dirs}
     try:
-        _CLAUDE.DEBUG_DIR = debug
+        for key, value in dirs.items():
+            setattr(_CLAUDE, key, value)
         _CLAUDE.cleanup_local(time.time(), dry_run=True)
         assert victim.exists(), "dry run deleted a file"
 
         _CLAUDE.cleanup_local(time.time(), dry_run=False)
         assert not victim.exists(), "non-dry run left the file"
     finally:
-        _CLAUDE.DEBUG_DIR = original
+        for key, value in saved.items():
+            setattr(_CLAUDE, key, value)
 
 
 def test_cleanup_local_spares_recent_files(tmp):
-    debug = Path(tmp) / "debug"
-    debug.mkdir()
-    keep = debug / "fresh.log"
+    dirs = _sandboxed_claude_dirs(tmp)
+    dirs["DEBUG_DIR"].mkdir(parents=True)
+    keep = dirs["DEBUG_DIR"] / "fresh.log"
     keep.write_text("x", encoding="utf-8")
 
-    original = _CLAUDE.DEBUG_DIR
+    saved = {k: getattr(_CLAUDE, k) for k in dirs}
     try:
-        _CLAUDE.DEBUG_DIR = debug
+        for key, value in dirs.items():
+            setattr(_CLAUDE, key, value)
         _CLAUDE.cleanup_local(time.time() - 10_000, dry_run=False)
         assert keep.exists(), "deleted a file newer than the cutoff"
     finally:
-        _CLAUDE.DEBUG_DIR = original
+        for key, value in saved.items():
+            setattr(_CLAUDE, key, value)
 
 
 # --- machine identity --------------------------------------------------------

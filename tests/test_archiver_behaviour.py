@@ -31,6 +31,7 @@ import _util
 # (`from .settings import ...`), which have no parent package when a file
 # is loaded standalone. See _util.load_package_module.
 _CODEX = _util.load_package_module("codex")
+_PROVIDER = _util.load_package_module("provider")
 _SETTINGS = _util.load_package_module("settings")
 
 
@@ -284,6 +285,99 @@ def test_non_string_settings_values_are_ignored(tmp):
     finally:
         _SETTINGS.SETTINGS_DIR, _SETTINGS.LEGACY_SETTINGS_DIR = orig_dir, orig_legacy
         _SETTINGS._file_env(force=True)
+
+
+# --- transcript provider classification --------------------------------------
+
+def _assistant(model):
+    return {"type": "assistant",
+            "message": {"role": "assistant", "model": model}}
+
+
+def _jsonl_bytes(*entries):
+    return ("\n".join(json.dumps(e) for e in entries) + "\n").encode("utf-8")
+
+
+def test_a_glm_model_classifies_as_zai(tmp):
+    path = Path(tmp) / "s.jsonl"
+    path.write_bytes(_jsonl_bytes(
+        {"type": "user", "message": {"role": "user", "content": "hi"}},
+        _assistant("glm-5.3-flash")))
+    assert _PROVIDER.of_file(path) == "zai"
+
+
+def test_a_claude_model_classifies_as_claude(tmp):
+    path = Path(tmp) / "s.jsonl"
+    path.write_bytes(_jsonl_bytes(_assistant("claude-opus-5")))
+    assert _PROVIDER.of_file(path) == "claude"
+
+
+def test_a_fable_model_also_classifies_as_claude(tmp):
+    path = Path(tmp) / "s.jsonl"
+    path.write_bytes(_jsonl_bytes(_assistant("claude-fable-5")))
+    assert _PROVIDER.of_file(path) == "claude"
+
+
+def test_the_first_classified_entry_decides(tmp):
+    glm_first = Path(tmp) / "glm-first.jsonl"
+    glm_first.write_bytes(_jsonl_bytes(_assistant("glm-5.3-flash"),
+                                       _assistant("claude-opus-5")))
+    assert _PROVIDER.of_file(glm_first) == "zai"
+
+    claude_first = Path(tmp) / "claude-first.jsonl"
+    claude_first.write_bytes(_jsonl_bytes(_assistant("claude-opus-5"),
+                                          _assistant("glm-5.3-flash")))
+    assert _PROVIDER.of_file(claude_first) == "claude"
+
+
+def test_a_model_mention_in_user_text_never_classifies(tmp):
+    """Only `type: assistant` entries carry a model the archiver trusts."""
+    path = Path(tmp) / "s.jsonl"
+    path.write_bytes(_jsonl_bytes(
+        {"type": "user", "message": {"role": "user",
+         "content": 'run this on "model":"claude-opus-5" please'}}))
+    assert _PROVIDER.of_file(path) is None
+
+
+def test_unknown_models_are_skipped_until_a_known_one(tmp):
+    path = Path(tmp) / "s.jsonl"
+    path.write_bytes(_jsonl_bytes(_assistant("<synthetic>"),
+                                  _assistant("glm-5.3-flash")))
+    assert _PROVIDER.of_file(path) == "zai"
+
+    only_unknown = Path(tmp) / "unknown.jsonl"
+    only_unknown.write_bytes(_jsonl_bytes(_assistant("<synthetic>")))
+    assert _PROVIDER.of_file(only_unknown) is None
+
+
+def test_a_truncated_final_line_still_classifies_from_what_precedes(tmp):
+    body = _jsonl_bytes(_assistant("claude-opus-5")) + b'{"type": "as'
+    path = Path(tmp) / "s.jsonl"
+    path.write_bytes(body)
+    assert _PROVIDER.of_file(path) == "claude"
+
+
+def test_an_absent_transcript_classifies_as_none(tmp):
+    assert _PROVIDER.of_file(Path(tmp) / "nope.jsonl") is None
+
+
+def test_transcript_in_takes_the_first_jsonl(tmp):
+    directory = Path(tmp) / "uuid-dir"
+    _write_jsonl(directory / "b.jsonl", _assistant("claude-opus-5"))
+    _write_jsonl(directory / "a.jsonl", _assistant("glm-5.3-flash"))
+    assert _PROVIDER.transcript_in(directory) == directory / "a.jsonl"
+
+
+def test_transcript_in_is_none_without_a_jsonl(tmp):
+    directory = Path(tmp) / "uuid-dir"
+    directory.mkdir()
+    assert _PROVIDER.transcript_in(directory) is None
+    assert _PROVIDER.transcript_in(Path(tmp) / "absent") is None
+
+
+def _write_jsonl(path, *entries):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_jsonl_bytes(*entries))
 
 
 if __name__ == "__main__":

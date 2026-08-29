@@ -58,6 +58,7 @@
 !/session_archivers/claude.py
 !/session_archivers/codex.py
 !/session_archivers/kimi.py
+!/session_archivers/provider.py
 !/session_archivers/runtime.py
 !/session_archivers/settings.py
 !/session_archivers/store.py

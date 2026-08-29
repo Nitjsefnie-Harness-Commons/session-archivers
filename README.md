@@ -6,8 +6,12 @@ Kimi and Codex.
 Each harness stores sessions differently — Claude by project directory, Kimi by
 working directory, Codex in date buckets — so the three walks are three modules
 rather than one parameterised routine. Each also has its own bucket:
-`R2_BUCKET_CLAUDE`, `R2_BUCKET_KIMI` and `R2_BUCKET_CODEX` are three separate
-destinations and nothing merges them.
+`R2_BUCKET_CLAUDE`, `R2_BUCKET_KIMI` and `R2_BUCKET_CODEX` are separate
+destinations and nothing merges them. The Claude archiver splits its tree one
+step further: a Claude Code session can be powered by GLM (served through a
+z.ai endpoint) just as well as by Anthropic's models, and each session files
+under the bucket of the provider that actually ran it — `R2_BUCKET_CLAUDE`
+for the latter, `R2_BUCKET_ZAI` for the former.
 
 What the three share is the *way* each one is written to — one key layout, one
 manifest format, one single-instance lock, one compression policy — so a
@@ -61,6 +65,7 @@ values are read at call time, so importing a module never demands them:
 | `R2_SECRET_ACCESS_KEY` | R2 API token secret |
 | `R2_ACCOUNT_ID` | account that owns the bucket; falls back to `CLOUDFLARE_ACCOUNT_ID`, because it is the same account |
 | `R2_BUCKET_CLAUDE` / `R2_BUCKET_KIMI` / `R2_BUCKET_CODEX` | destination buckets, defaulting to `claude` / `kimi` / `codex` |
+| `R2_BUCKET_ZAI` | destination bucket for GLM transcripts the Claude archiver finds, defaulting to `zai` |
 
 Resolution order: the environment, then `~/.agent-bundle/settings.local.json`,
 then `~/.agent-bundle/settings.json`, then legacy `~/.claude` settings, then the
@@ -69,6 +74,19 @@ required — the wheel stands on its own.
 
 A missing credential raises naming the exact key. A half-configured archiver
 that silently uploads nowhere is worse than one that refuses to start.
+
+### How a transcript is classified zai vs claude
+
+The archiver reads only what an assistant entry itself recorded — the
+`message.model` field of `type: "assistant"` lines — never body text, because
+a GLM session discussing "claude-opus-5" (or the reverse) is exactly what a
+substring scan misfiles. The first assistant entry naming a known family
+(`glm` → zai, `claude`/`anthropic` → claude) decides; transcripts are
+append-only, so that first answer never changes. A transcript that names no
+known model — a session that never got a reply, say — files under the claude
+bucket, the harness's own. Only positive evidence of GLM routes to zai.
+Classifications are memoised in `~/.claude/cleanup-sessions.providers.json`
+keyed by uuid and size, so an unchanged transcript is not re-read every run.
 
 ## Where this came from
 

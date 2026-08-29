@@ -32,6 +32,46 @@ _KIMI = _util.load_package_module("kimi")
 _STORE = _util.load_package_module("store")
 
 _BUCKET = "test-bucket"
+_ZAI_BUCKET = "zai-bucket"
+
+
+class TwoBucketS3:  # pylint: disable=too-few-public-methods
+    """Dispatch every call to the FakeS3 that owns the bucket it names.
+
+    The claude archiver talks to two buckets — one client, one Store per
+    bucket — so its main() tests hand the stub a routing table instead of a
+    single bucket. A call naming a bucket no stub owns fails here rather
+    than passing quietly, which is what lets a test catch a misrouted
+    upload.
+    """
+
+    def __init__(self, *fakes):
+        self.by_bucket = {fake.bucket: fake for fake in fakes}
+
+    def _pick(self, bucket):
+        fake = self.by_bucket.get(bucket)
+        if fake is None:
+            raise AssertionError(f"no stub owns bucket {bucket!r}")
+        return fake
+
+    def get_object(self, **kwargs):
+        return self._pick(kwargs["Bucket"]).get_object(**kwargs)
+
+    def put_object(self, **kwargs):
+        return self._pick(kwargs["Bucket"]).put_object(**kwargs)
+
+    def delete_object(self, **kwargs):
+        self._pick(kwargs["Bucket"]).delete_object(**kwargs)
+
+    def get_paginator(self, name):
+        outer, real = self, name
+
+        class _Page:
+            def paginate(self, **kwargs):
+                fake = outer._pick(kwargs["Bucket"])
+                yield from fake.get_paginator(real).paginate(**kwargs)
+
+        return _Page()
 
 
 @contextlib.contextmanager
@@ -54,6 +94,16 @@ def _dest(dry_run=False):
     return _STORE.Store(client, _BUCKET, said.append, dry_run), client, said
 
 
+def _dests(dry_run=False):
+    """One Store per bucket over two stubs, plus the stubs and the log."""
+    claude_client = _util.FakeS3(_BUCKET)
+    zai_client = _util.FakeS3(_ZAI_BUCKET)
+    said = []
+    return (_STORE.Store(claude_client, _BUCKET, said.append, dry_run),
+            _STORE.Store(zai_client, _ZAI_BUCKET, said.append, dry_run),
+            claude_client, zai_client, said)
+
+
 def _write(path, data, days_old=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(data, str):
@@ -73,16 +123,29 @@ def _cutoff(days=3):
     return time.time() - days * 86400
 
 
-def _run_main(mod, tmp, argv, client, **attrs):
-    """Drive an archiver's main() with the stub client and a sandboxed tree."""
+def _run_main(mod, tmp, argv, client, zai_client=None, **attrs):
+    """Drive an archiver's main() with the stub client and a sandboxed tree.
+
+    `zai_client` is for the claude archiver, which talks to two buckets —
+    one client, one Store per bucket. The stub becomes a router and
+    ZAI_BUCKET is sandboxed to the stub's own bucket name.
+    """
     saved_argv = sys.argv
     saved_client = _STORE.client
     attrs.setdefault("BUCKET", _BUCKET)
+    if zai_client is not None:
+        attrs.setdefault("ZAI_BUCKET", zai_client.bucket)
     attrs.setdefault("LOG_FILE", Path(tmp) / "archive.log")
     attrs.setdefault("LOCK_FILE", Path(tmp) / "run.lock")
+    if mod is _CLAUDE:
+        attrs.setdefault("PROVIDER_CACHE", Path(tmp) / "providers.json")
     try:
         sys.argv = argv
-        _STORE.client = lambda: client
+        if zai_client is not None:
+            router = TwoBucketS3(client, zai_client)
+            _STORE.client = lambda: router
+        else:
+            _STORE.client = lambda: client
         with sandbox(mod, **attrs):
             code = mod.main()
         log_path = attrs["LOG_FILE"]
@@ -100,9 +163,10 @@ def test_claude_archives_a_transcript_and_its_data_dir(tmp):
     uuid = "1111-2222"
     _write(projects / "-root-proj" / f"{uuid}.jsonl", '{"type": "user"}\n')
     _write(projects / "-root-proj" / uuid / "tasks.json", "{}")
-    dest, client, _ = _dest()
-    with sandbox(_CLAUDE, PROJECTS_DIR=projects):
-        assert _CLAUDE.archive_projects(dest, _cutoff(1)) == (2, 0, 0)
+    dest, zai, client, _, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (2, 0, 0)
     assert sorted(client.objects) == [
         f"-root-proj/{uuid}/{uuid}.jsonl.xz",
         f"-root-proj/{uuid}/data/tasks.json.xz",
@@ -114,9 +178,10 @@ def test_claude_deletes_a_stale_transcript_and_its_data_dir(tmp):
     uuid = "aaaa-bbbb"
     jsonl = _write(projects / "p" / f"{uuid}.jsonl", '{"x": 1}\n', days_old=10)
     data = _write(projects / "p" / uuid / "blob.json", "{}")
-    dest, client, _ = _dest()
-    with sandbox(_CLAUDE, PROJECTS_DIR=projects):
-        assert _CLAUDE.archive_projects(dest, _cutoff()) == (2, 1, 0)
+    dest, zai, client, _, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (2, 1, 0)
     assert not jsonl.exists()
     assert not data.parent.exists()
     assert f"p/{uuid}/{uuid}.jsonl.xz" in client.objects
@@ -125,9 +190,10 @@ def test_claude_deletes_a_stale_transcript_and_its_data_dir(tmp):
 def test_claude_keeps_a_fresh_transcript(tmp):
     projects = Path(tmp) / "projects"
     jsonl = _write(projects / "p" / "fresh.jsonl", "{}\n")
-    dest, _, _ = _dest()
-    with sandbox(_CLAUDE, PROJECTS_DIR=projects):
-        assert _CLAUDE.archive_projects(dest, _cutoff()) == (1, 0, 0)
+    dest, zai, _, _, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (1, 0, 0)
     assert jsonl.exists()
 
 
@@ -136,10 +202,11 @@ def test_claude_dry_run_uploads_nothing_and_deletes_nothing(tmp):
     uuid = "iiii-jjjj"
     jsonl = _write(projects / "p" / f"{uuid}.jsonl", "{}\n", days_old=10)
     data = _write(projects / "p" / uuid / "blob.json", "{}")
-    dest, client, said = _dest(dry_run=True)
-    with sandbox(_CLAUDE, PROJECTS_DIR=projects):
-        assert _CLAUDE.archive_projects(dest, _cutoff()) == (2, 1, 0)
-    assert client.puts == []
+    dest, zai, client, zai_client, said = _dests(dry_run=True)
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (2, 1, 0)
+    assert client.puts == [] and zai_client.puts == []
     assert jsonl.exists() and data.exists()
     assert any("DRY rm " in line for line in said)
     assert any("DRY rmtree" in line for line in said)
@@ -149,9 +216,10 @@ def test_claude_archives_an_orphan_uuid_dir(tmp):
     """A data dir whose transcript is already gone still holds artifacts."""
     projects = Path(tmp) / "projects"
     _write(projects / "p" / "cccc-dddd" / "out.txt", "left behind")
-    dest, client, _ = _dest()
-    with sandbox(_CLAUDE, PROJECTS_DIR=projects):
-        assert _CLAUDE.archive_projects(dest, _cutoff(1)) == (1, 0, 0)
+    dest, zai, client, _, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0)
     assert "p/cccc-dddd/data/out.txt.xz" in client.objects
 
 
@@ -160,9 +228,10 @@ def test_claude_deletes_a_stale_orphan_dir(tmp):
     orphan = projects / "p" / "eeee-ffff"
     _write(orphan / "out.txt", "left behind")
     _age(orphan, 10)
-    dest, _, _ = _dest()
-    with sandbox(_CLAUDE, PROJECTS_DIR=projects):
-        assert _CLAUDE.archive_projects(dest, _cutoff()) == (1, 1, 0)
+    dest, zai, _, _, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (1, 1, 0)
     assert not orphan.exists()
 
 
@@ -171,9 +240,10 @@ def test_claude_dry_run_keeps_a_stale_orphan_dir(tmp):
     orphan = projects / "p" / "mmmm-nnnn"
     _write(orphan / "out.txt", "x")
     _age(orphan, 10)
-    dest, _, said = _dest(dry_run=True)
-    with sandbox(_CLAUDE, PROJECTS_DIR=projects):
-        assert _CLAUDE.archive_projects(dest, _cutoff()) == (1, 1, 0)
+    dest, zai, _, _, said = _dests(dry_run=True)
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (1, 1, 0)
     assert orphan.exists()
     assert any("DRY rmtree" in line for line in said)
 
@@ -183,29 +253,32 @@ def test_claude_never_archives_the_memory_and_tasks_directories(tmp):
     projects = Path(tmp) / "projects"
     _write(projects / "p" / "memory" / "note.md", "private")
     _write(projects / "p" / "tasks" / "t.output", "scratch")
-    dest, client, _ = _dest()
-    with sandbox(_CLAUDE, PROJECTS_DIR=projects):
-        assert _CLAUDE.archive_projects(dest, _cutoff(1)) == (0, 0, 0)
-    assert client.objects == {}
+    dest, zai, client, zai_client, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (0, 0, 0)
+    assert client.objects == {} and zai_client.objects == {}
 
 
 def test_claude_ignores_a_loose_file_where_a_project_should_be(tmp):
     projects = Path(tmp) / "projects"
     _write(projects / "stray.txt", "not a project")
-    dest, client, _ = _dest()
-    with sandbox(_CLAUDE, PROJECTS_DIR=projects):
-        assert _CLAUDE.archive_projects(dest, _cutoff(1)) == (0, 0, 0)
-    assert client.objects == {}
+    dest, zai, client, zai_client, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (0, 0, 0)
+    assert client.objects == {} and zai_client.objects == {}
 
 
 def test_claude_does_not_delete_a_transcript_whose_upload_failed(tmp):
     """A failed upload must never take the only copy with it."""
     projects = Path(tmp) / "projects"
     jsonl = _write(projects / "p" / "doomed.jsonl", "{}\n", days_old=10)
-    dest, client, said = _dest()
+    dest, zai, client, _, said = _dests()
     client.fail_puts.add("p/doomed/doomed.jsonl.xz")
-    with sandbox(_CLAUDE, PROJECTS_DIR=projects):
-        assert _CLAUDE.archive_projects(dest, _cutoff()) == (0, 0, 1)
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (0, 0, 1)
     assert jsonl.exists()
     assert any("upload failed" in line for line in said)
 
@@ -215,10 +288,11 @@ def test_claude_does_not_delete_when_the_data_dir_upload_failed(tmp):
     uuid = "gggg-hhhh"
     jsonl = _write(projects / "p" / f"{uuid}.jsonl", "{}\n", days_old=10)
     _write(projects / "p" / uuid / "blob.json", "{}")
-    dest, client, said = _dest()
+    dest, zai, client, _, said = _dests()
     client.fail_puts.add(f"p/{uuid}/data/blob.json.xz")
-    with sandbox(_CLAUDE, PROJECTS_DIR=projects):
-        assert _CLAUDE.archive_projects(dest, _cutoff()) == (1, 0, 1)
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (1, 0, 1)
     assert jsonl.exists()
     assert any("not deleting either" in line for line in said)
 
@@ -228,18 +302,20 @@ def test_claude_counts_a_failed_orphan_upload_and_keeps_the_dir(tmp):
     orphan = projects / "p" / "kkkk-llll"
     _write(orphan / "out.txt", "left behind")
     _age(orphan, 10)
-    dest, client, said = _dest()
+    dest, zai, client, _, said = _dests()
     client.fail_puts.add("p/kkkk-llll/data/out.txt.xz")
-    with sandbox(_CLAUDE, PROJECTS_DIR=projects):
-        assert _CLAUDE.archive_projects(dest, _cutoff()) == (0, 0, 1)
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (0, 0, 1)
     assert orphan.exists()
     assert any("orphan uuid_dir" in line for line in said)
 
 
 def test_claude_on_a_machine_with_no_projects_dir(tmp):
-    dest, _, _ = _dest()
-    with sandbox(_CLAUDE, PROJECTS_DIR=Path(tmp) / "absent"):
-        assert _CLAUDE.archive_projects(dest, 0) == (0, 0, 0)
+    dest, zai, _, _, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=Path(tmp) / "absent",
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, 0) == (0, 0, 0)
 
 
 def test_claude_cleanup_sweeps_all_three_scratch_dirs(tmp):
@@ -268,6 +344,7 @@ def test_claude_main_archives_uploads_and_saves_the_manifest(tmp):
     client = _util.FakeS3(_BUCKET)
     code, out = _run_main(
         _CLAUDE, tmp, ["archive-claude-sessions", "--days", "3"], client,
+        zai_client=_util.FakeS3(_ZAI_BUCKET),
         PROJECTS_DIR=projects, DEBUG_DIR=Path(tmp) / "absent",
         FILE_HISTORY_DIR=Path(tmp) / "absent", TELEMETRY_DIR=Path(tmp) / "absent")
     assert code == 0
@@ -284,6 +361,7 @@ def test_claude_main_uses_the_bucket_its_own_setting_names(tmp):
     client = _util.FakeS3("claude-only")
     code, _ = _run_main(
         _CLAUDE, tmp, ["archive-claude-sessions"], client,
+        zai_client=_util.FakeS3("zai-only"),
         BUCKET="claude-only", PROJECTS_DIR=projects,
         DEBUG_DIR=Path(tmp) / "absent", FILE_HISTORY_DIR=Path(tmp) / "absent",
         TELEMETRY_DIR=Path(tmp) / "absent")
@@ -299,6 +377,7 @@ def test_claude_main_returns_one_when_an_upload_failed(tmp):
     client.fail_puts.add("p/s2/s2.jsonl.xz")
     code, out = _run_main(
         _CLAUDE, tmp, ["archive-claude-sessions"], client,
+        zai_client=_util.FakeS3(_ZAI_BUCKET),
         PROJECTS_DIR=projects, DEBUG_DIR=Path(tmp) / "absent",
         FILE_HISTORY_DIR=Path(tmp) / "absent", TELEMETRY_DIR=Path(tmp) / "absent")
     assert code == 1
@@ -313,6 +392,7 @@ def test_claude_main_logs_a_failed_manifest_save_without_failing_the_run(tmp):
     client.fail_puts.add(_STORE.manifest_key())
     code, out = _run_main(
         _CLAUDE, tmp, ["archive-claude-sessions"], client,
+        zai_client=_util.FakeS3(_ZAI_BUCKET),
         PROJECTS_DIR=projects, DEBUG_DIR=Path(tmp) / "absent",
         FILE_HISTORY_DIR=Path(tmp) / "absent", TELEMETRY_DIR=Path(tmp) / "absent")
     assert code == 0
@@ -326,6 +406,7 @@ def test_claude_main_dry_run_writes_nothing_to_the_bucket(tmp):
     client = _util.FakeS3(_BUCKET)
     code, _ = _run_main(
         _CLAUDE, tmp, ["archive-claude-sessions", "--dry-run"], client,
+        zai_client=_util.FakeS3(_ZAI_BUCKET),
         PROJECTS_DIR=projects, DEBUG_DIR=Path(tmp) / "absent",
         FILE_HISTORY_DIR=Path(tmp) / "absent", TELEMETRY_DIR=Path(tmp) / "absent")
     assert code == 0
@@ -341,7 +422,8 @@ def test_claude_main_exits_quietly_when_another_run_holds_the_lock(tmp):
     try:
         client = _util.FakeS3(_BUCKET)
         code, out = _run_main(
-            _CLAUDE, tmp, ["archive-claude-sessions"], client, LOCK_FILE=lock,
+            _CLAUDE, tmp, ["archive-claude-sessions"], client,
+            zai_client=_util.FakeS3(_ZAI_BUCKET), LOCK_FILE=lock,
             PROJECTS_DIR=Path(tmp) / "absent", DEBUG_DIR=Path(tmp) / "absent",
             FILE_HISTORY_DIR=Path(tmp) / "absent",
             TELEMETRY_DIR=Path(tmp) / "absent")
@@ -350,6 +432,182 @@ def test_claude_main_exits_quietly_when_another_run_holds_the_lock(tmp):
     assert code == 0
     assert client.puts == []
     assert "previous run still holds the lock" in out
+
+
+def _glm_entries():
+    """A GLM session whose user text quotes a claude model id — exactly the
+    shape a naive substring scan misclassifies, so the suite pins it."""
+    user_text = 'which is better, "model":"claude-opus-5" or GLM?'
+    return [
+        {"type": "user",
+         "message": {"role": "user", "content": user_text}},
+        {"type": "assistant",
+         "message": {"role": "assistant", "model": "glm-5.3-flash",
+                     "content": [{"type": "text", "text": "GLM."}]}},
+    ]
+
+
+def _claude_entries():
+    user_text = 'my other sessions run on "model":"glm-5.3-flash"'
+    return [
+        {"type": "user",
+         "message": {"role": "user", "content": user_text}},
+        {"type": "assistant",
+         "message": {"role": "assistant", "model": "claude-opus-5",
+                     "content": [{"type": "text", "text": "Claude."}]}},
+    ]
+
+
+def _session_body(entries):
+    return "\n".join(json.dumps(e) for e in entries) + "\n"
+
+
+def test_claude_files_a_glm_transcript_into_the_zai_bucket(tmp):
+    projects = Path(tmp) / "projects"
+    uuid = "zz01-glm"
+    _write(projects / "p" / f"{uuid}.jsonl", _session_body(_glm_entries()))
+    _write(projects / "p" / uuid / "tasks.json", "{}")
+    dest, zai, client, zai_client, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (2, 0, 0)
+    assert f"p/{uuid}/{uuid}.jsonl.xz" in zai_client.objects
+    assert f"p/{uuid}/data/tasks.json.xz" in zai_client.objects
+    assert client.objects == {}
+
+
+def test_claude_files_a_claude_transcript_into_the_claude_bucket(tmp):
+    projects = Path(tmp) / "projects"
+    uuid = "zz02-claude"
+    _write(projects / "p" / f"{uuid}.jsonl", _session_body(_claude_entries()))
+    _write(projects / "p" / uuid / "tasks.json", "{}")
+    dest, zai, client, zai_client, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (2, 0, 0)
+    assert f"p/{uuid}/{uuid}.jsonl.xz" in client.objects
+    assert f"p/{uuid}/data/tasks.json.xz" in client.objects
+    assert zai_client.objects == {}
+
+
+def test_claude_defaults_an_unclassifiable_transcript_to_the_claude_bucket(tmp):
+    projects = Path(tmp) / "projects"
+    _write(projects / "p" / "zz03-quiet.jsonl", '{"type": "user"}\n')
+    dest, zai, client, zai_client, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0)
+    assert "p/zz03-quiet/zz03-quiet.jsonl.xz" in client.objects
+    assert zai_client.objects == {}
+
+
+def test_claude_routes_an_orphan_dir_by_the_transcript_inside_it(tmp):
+    projects = Path(tmp) / "projects"
+    _write(projects / "p" / "zz04-orphan" / "wire.jsonl",
+           _session_body(_glm_entries()))
+    dest, zai, client, zai_client, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0)
+    assert "p/zz04-orphan/data/wire.jsonl.xz" in zai_client.objects
+    assert client.objects == {}
+
+
+def test_claude_routes_an_orphan_dir_without_a_transcript_as_claude(tmp):
+    projects = Path(tmp) / "projects"
+    _write(projects / "p" / "zz05-orphan" / "out.txt", "left behind")
+    dest, zai, client, zai_client, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0)
+    assert "p/zz05-orphan/data/out.txt.xz" in client.objects
+    assert zai_client.objects == {}
+
+
+def test_claude_trusts_a_cached_provider_for_a_grown_session(tmp):
+    """First-model is append-stable, so a grown file is not rescanned — the
+    cached provider wins even over what the file now says."""
+    projects = Path(tmp) / "projects"
+    uuid = "zz06-cache"
+    body = _session_body(_claude_entries())
+    _write(projects / "p" / f"{uuid}.jsonl", body)
+    cache = Path(tmp) / "providers.json"
+    # Cached when the file was smaller, and the scan had said zai.
+    cache.write_text(json.dumps({"p/zz06-cache": [len(body) - 5, "zai"]}))
+    dest, zai, _, zai_client, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0)
+    assert f"p/{uuid}/{uuid}.jsonl.xz" in zai_client.objects
+
+
+def test_claude_rescans_a_session_that_shrank_below_its_cached_size(tmp):
+    """A file smaller than the cache remembers was rewritten: rescan it."""
+    projects = Path(tmp) / "projects"
+    uuid = "zz07-shrunk"
+    body = _session_body(_claude_entries())
+    _write(projects / "p" / f"{uuid}.jsonl", body)
+    cache = Path(tmp) / "providers.json"
+    cache.write_text(json.dumps({"p/zz07-shrunk": [len(body) + 5, "zai"]}))
+    dest, zai, client, zai_client, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0)
+    assert f"p/{uuid}/{uuid}.jsonl.xz" in client.objects
+    assert zai_client.objects == {}
+
+
+def test_claude_does_not_rescan_an_unchanged_unclassified_session(tmp):
+    """Unknown last time and byte-identical since: the default stands."""
+    projects = Path(tmp) / "projects"
+    uuid = "zz08-quiet"
+    body = '{"type": "user"}\n'
+    _write(projects / "p" / f"{uuid}.jsonl", body)
+    cache = Path(tmp) / "providers.json"
+    cache.write_text(json.dumps({"p/zz08-quiet": [len(body), ""]}))
+    dest, zai, client, zai_client, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0)
+    assert f"p/{uuid}/{uuid}.jsonl.xz" in client.objects
+    assert zai_client.objects == {}
+
+
+def test_claude_dry_run_writes_no_provider_cache(tmp):
+    projects = Path(tmp) / "projects"
+    _write(projects / "p" / "zz09-dry.jsonl", _session_body(_glm_entries()))
+    cache = Path(tmp) / "providers.json"
+    dest, zai, _, _, _ = _dests(dry_run=True)
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0)
+    assert not cache.exists()
+
+
+def test_claude_a_real_run_persists_the_provider_cache(tmp):
+    projects = Path(tmp) / "projects"
+    _write(projects / "p" / "zz10-real.jsonl", _session_body(_glm_entries()))
+    cache = Path(tmp) / "providers.json"
+    dest, zai, _, _, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0)
+    entry = json.loads(cache.read_text(encoding="utf-8"))["p/zz10-real"]
+    assert entry[1] == "zai"
+
+
+def test_claude_main_files_each_provider_into_its_own_bucket(tmp):
+    projects = Path(tmp) / "projects"
+    _write(projects / "p" / "glm-session.jsonl", _session_body(_glm_entries()))
+    _write(projects / "p" / "cc-session.jsonl", _session_body(_claude_entries()))
+    client = _util.FakeS3(_BUCKET)
+    zai_client = _util.FakeS3(_ZAI_BUCKET)
+    code, out = _run_main(
+        _CLAUDE, tmp, ["archive-claude-sessions", "--days", "3"], client,
+        zai_client=zai_client,
+        PROJECTS_DIR=projects, DEBUG_DIR=Path(tmp) / "absent",
+        FILE_HISTORY_DIR=Path(tmp) / "absent", TELEMETRY_DIR=Path(tmp) / "absent")
+    assert code == 0
+    assert "p/glm-session/glm-session.jsonl.xz" in zai_client.objects
+    assert "p/cc-session/cc-session.jsonl.xz" in client.objects
+    assert _STORE.manifest_key() in client.objects
+    assert _STORE.manifest_key() in zai_client.objects
+    assert "done — uploaded=2 deleted=0 failures=0" in out
 
 
 # --- codex ---------------------------------------------------------------------------

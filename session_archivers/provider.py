@@ -1,8 +1,10 @@
-"""Which model family wrote a transcript: zai (GLM) or claude (Anthropic).
+"""Which model family wrote a transcript: zai (GLM), llama (a local
+llama.cpp server) or claude (Anthropic).
 
-The claude archiver walks one tree that mixes both — Claude Code sessions can
-be powered by Anthropic's models or by GLM served through a z.ai endpoint,
-and the two must not land in the same bucket. The classifier reads only what
+The claude archiver walks one tree that mixes them — Claude Code sessions can
+be powered by Anthropic's models, by GLM served through a z.ai endpoint, or by
+a GGUF served through llama.cpp's Anthropic-compatible endpoint — and they
+must not land in the same bucket. The classifier reads only what
 an assistant entry itself recorded — `type: "assistant"` and `message.model`
 — and never body text: a session discussing "claude-opus-5" while running on
 GLM (or the reverse) is exactly the transcript a substring scan would misfile.
@@ -17,17 +19,25 @@ None, and the caller files it under the harness's own bucket.
 import json
 
 ZAI = 'zai'
+LLAMA = 'llama'
 CLAUDE = 'claude'
 
+# A llama.cpp server reports whatever alias it was started with, so this names
+# the models actually served that way rather than the server: add a needle
+# when a new GGUF joins the lane. Unknown ids stay unclassified on purpose —
+# routing every unrecognised name to llama would carry a future Anthropic
+# model id there too.
 KNOWN_FAMILIES = (
     ('glm', ZAI),
+    ('bonsai', LLAMA),
+    ('llama', LLAMA),
     ('claude', CLAUDE),
     ('anthropic', CLAUDE),
 )
 
 
 def from_model(model):
-    """'zai' or 'claude' when `model` names a known family, else None."""
+    """'zai', 'llama' or 'claude' when `model` names a known family, else None."""
     lowered = (model or '').lower()
     for needle, family in KNOWN_FAMILIES:
         if needle in lowered:

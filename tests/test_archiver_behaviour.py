@@ -306,6 +306,19 @@ def test_a_glm_model_classifies_as_zai(tmp):
     assert _PROVIDER.of_file(path) == "zai"
 
 
+def test_a_bonsai_model_classifies_as_llama(tmp):
+    """bonsai-2-27b is what a llama.cpp server reports for that GGUF."""
+    path = Path(tmp) / "s.jsonl"
+    path.write_bytes(_jsonl_bytes(_assistant("bonsai-2-27b")))
+    assert _PROVIDER.of_file(path) == "llama"
+
+
+def test_a_llama_model_classifies_as_llama(tmp):
+    path = Path(tmp) / "s.jsonl"
+    path.write_bytes(_jsonl_bytes(_assistant("llama-3.3-70b")))
+    assert _PROVIDER.of_file(path) == "llama"
+
+
 def test_a_claude_model_classifies_as_claude(tmp):
     path = Path(tmp) / "s.jsonl"
     path.write_bytes(_jsonl_bytes(_assistant("claude-opus-5")))

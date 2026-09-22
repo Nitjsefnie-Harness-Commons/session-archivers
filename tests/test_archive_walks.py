@@ -33,6 +33,7 @@ _STORE = _util.load_package_module("store")
 
 _BUCKET = "test-bucket"
 _ZAI_BUCKET = "zai-bucket"
+_LLAMA_BUCKET = "llama-bucket"
 
 
 class TwoBucketS3:  # pylint: disable=too-few-public-methods
@@ -123,18 +124,24 @@ def _cutoff(days=3):
     return time.time() - days * 86400
 
 
-def _run_main(mod, tmp, argv, client, zai_client=None, **attrs):
+def _run_main(mod, tmp, argv, client, zai_client=None, llama_client=None,
+              **attrs):
     """Drive an archiver's main() with the stub client and a sandboxed tree.
 
-    `zai_client` is for the claude archiver, which talks to two buckets —
-    one client, one Store per bucket. The stub becomes a router and
-    ZAI_BUCKET is sandboxed to the stub's own bucket name.
+    `zai_client` / `llama_client` are for the claude archiver, which talks to
+    three buckets — one client, one Store per bucket. The stub becomes a
+    router and ZAI_BUCKET / LLAMA_BUCKET are sandboxed to the stubs' own
+    bucket names; a llama stub is made when only a zai one is given, so the
+    router owns every bucket main() opens.
     """
     saved_argv = sys.argv
     saved_client = _STORE.client
     attrs.setdefault("BUCKET", _BUCKET)
     if zai_client is not None:
         attrs.setdefault("ZAI_BUCKET", zai_client.bucket)
+        if llama_client is None:
+            llama_client = _util.FakeS3(_LLAMA_BUCKET)
+        attrs.setdefault("LLAMA_BUCKET", llama_client.bucket)
     attrs.setdefault("LOG_FILE", Path(tmp) / "archive.log")
     attrs.setdefault("LOCK_FILE", Path(tmp) / "run.lock")
     if mod is _CLAUDE:
@@ -142,7 +149,7 @@ def _run_main(mod, tmp, argv, client, zai_client=None, **attrs):
     try:
         sys.argv = argv
         if zai_client is not None:
-            router = TwoBucketS3(client, zai_client)
+            router = TwoBucketS3(client, zai_client, llama_client)
             _STORE.client = lambda: router
         else:
             _STORE.client = lambda: client
@@ -476,6 +483,45 @@ def test_claude_files_a_glm_transcript_into_the_zai_bucket(tmp):
     assert client.objects == {}
 
 
+def _llama_entries():
+    return [
+        {"type": "user", "message": {"role": "user", "content": "hi"}},
+        {"type": "assistant",
+         "message": {"role": "assistant", "model": "bonsai-2-27b",
+                     "content": [{"type": "text", "text": "hello"}]}},
+    ]
+
+
+def test_claude_files_a_llama_transcript_into_the_llama_bucket(tmp):
+    projects = Path(tmp) / "projects"
+    uuid = "zz05-llama"
+    _write(projects / "p" / f"{uuid}.jsonl", _session_body(_llama_entries()))
+    _write(projects / "p" / uuid / "tasks.json", "{}")
+    dest, zai, client, zai_client, said = _dests()
+    llama_client = _util.FakeS3(_LLAMA_BUCKET)
+    llama = _STORE.Store(llama_client, _LLAMA_BUCKET, said.append, False)
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1),
+                                        llama_dest=llama) == (2, 0, 0)
+    assert f"p/{uuid}/{uuid}.jsonl.xz" in llama_client.objects
+    assert f"p/{uuid}/data/tasks.json.xz" in llama_client.objects
+    assert client.objects == {} and zai_client.objects == {}
+
+
+def test_claude_files_a_llama_transcript_under_claude_without_a_llama_store(tmp):
+    """The pre-1.3 call shape keeps the pre-1.3 destination."""
+    projects = Path(tmp) / "projects"
+    uuid = "zz06-llama"
+    _write(projects / "p" / f"{uuid}.jsonl", _session_body(_llama_entries()))
+    dest, zai, client, zai_client, _ = _dests()
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0)
+    assert f"p/{uuid}/{uuid}.jsonl.xz" in client.objects
+    assert zai_client.objects == {}
+
+
 def test_claude_files_a_claude_transcript_into_the_claude_bucket(tmp):
     projects = Path(tmp) / "projects"
     uuid = "zz02-claude"
@@ -595,19 +641,23 @@ def test_claude_main_files_each_provider_into_its_own_bucket(tmp):
     projects = Path(tmp) / "projects"
     _write(projects / "p" / "glm-session.jsonl", _session_body(_glm_entries()))
     _write(projects / "p" / "cc-session.jsonl", _session_body(_claude_entries()))
+    _write(projects / "p" / "gguf-session.jsonl", _session_body(_llama_entries()))
     client = _util.FakeS3(_BUCKET)
     zai_client = _util.FakeS3(_ZAI_BUCKET)
+    llama_client = _util.FakeS3(_LLAMA_BUCKET)
     code, out = _run_main(
         _CLAUDE, tmp, ["archive-claude-sessions", "--days", "3"], client,
-        zai_client=zai_client,
+        zai_client=zai_client, llama_client=llama_client,
         PROJECTS_DIR=projects, DEBUG_DIR=Path(tmp) / "absent",
         FILE_HISTORY_DIR=Path(tmp) / "absent", TELEMETRY_DIR=Path(tmp) / "absent")
     assert code == 0
     assert "p/glm-session/glm-session.jsonl.xz" in zai_client.objects
     assert "p/cc-session/cc-session.jsonl.xz" in client.objects
-    assert _STORE.manifest_key() in client.objects
-    assert _STORE.manifest_key() in zai_client.objects
-    assert "done — uploaded=2 deleted=0 failures=0" in out
+    assert "p/gguf-session/gguf-session.jsonl.xz" in llama_client.objects
+    assert "p/gguf-session/gguf-session.jsonl.xz" not in client.objects
+    for each in (client, zai_client, llama_client):
+        assert _STORE.manifest_key() in each.objects
+    assert "done — uploaded=3 deleted=0 failures=0" in out
 
 
 # --- codex ---------------------------------------------------------------------------

@@ -10,9 +10,9 @@ Behaviour per run:
    ~/.claude/debug/*, ~/.claude/file-history/*/, ~/.claude/telemetry/*
 3. For every project under ~/.claude/projects/<project>/:
      Pass 1 — each *.jsonl plus its matching UUID data dir:
-       the transcript is classified zai (GLM) or claude (Anthropic) and the
-       whole session — transcript and data dir — files under that provider's
-       bucket; upload (size-skip, idempotent), then delete locally if jsonl
+       the transcript is classified zai (GLM), llama (local llama.cpp) or
+       claude (Anthropic) and the whole session — transcript and data dir —
+       files under that provider's bucket; upload (size-skip, idempotent), then delete locally if jsonl
        mtime > DAYS.
      Pass 2 — orphan UUID dirs (no matching jsonl, excluding memory/, tasks/):
        routed by the transcript inside them when one is there, else claude;
@@ -23,7 +23,7 @@ Only the WALK is here. The destination — key layout, compression policy,
 manifest, inventory — lives in store.py, and the host-side scaffolding —
 logging, locking, the retention predicate — in runtime.py, both shared with
 the Kimi and Codex archivers; provider.py classifies transcripts for the
-zai-vs-claude split.
+per-provider split.
 
 Flags:
   --days N    retention threshold for the delete gate (default 3)
@@ -50,6 +50,9 @@ BUCKET = setting('R2_BUCKET_CLAUDE', 'claude')
 # same projects layout, same key layout — but they are a different provider's
 # data and keep their own bucket.
 ZAI_BUCKET = setting('R2_BUCKET_ZAI', 'zai')
+# Same again for sessions served by a local llama.cpp server through its
+# Anthropic-compatible endpoint: same tree, a third provider's data.
+LLAMA_BUCKET = setting('R2_BUCKET_LLAMA', 'llama')
 
 CLAUDE_DIR = Path.home() / '.claude'
 PROJECTS_DIR = CLAUDE_DIR / 'projects'
@@ -136,12 +139,12 @@ class _ProviderCache:
 
 
 def _route(cache, key, source):
-    '''The provider a session files under: 'zai' or 'claude'.
+    '''The provider a session files under: 'zai', 'llama' or 'claude'.
 
     `source` is the transcript, or an orphan dir (routed by the transcript
     inside it when one is there). Unclassifiable sessions file under the
     claude bucket — the harness's own — which is the conservative default:
-    only positive evidence of GLM routes to zai.
+    only positive evidence of another family routes away from it.
     '''
     if not source.is_file():
         source = provider.transcript_in(source)
@@ -166,17 +169,20 @@ def cleanup_local(cutoff, dry_run, log):
     runtime.sweep_files(TELEMETRY_DIR, cutoff, dry_run, log)
 
 
-def archive_projects(dest, zai_dest, cutoff):
+def archive_projects(dest, zai_dest, cutoff, llama_dest=None):
     '''Upload every project, delete what is past the retention gate.
 
     Each session files under the bucket of the provider its transcript
-    names — `dest` for claude, `zai_dest` for GLM. Returns
-    (uploaded, deleted, failed) summed over both buckets.
+    names — `dest` for claude, `zai_dest` for GLM, `llama_dest` for a local
+    llama.cpp server (falling back to `dest` when no store is given, the
+    pre-1.3 behaviour). Returns (uploaded, deleted, failed) summed over
+    every bucket.
     '''
     n_uploaded = n_deleted = n_failed = 0
     if not PROJECTS_DIR.is_dir():
         return 0, 0, 0
     cache = _ProviderCache(PROVIDER_CACHE)
+    routes = {provider.ZAI: zai_dest, provider.LLAMA: llama_dest or dest}
 
     for project_dir in PROJECTS_DIR.iterdir():
         if not project_dir.is_dir():
@@ -191,7 +197,7 @@ def archive_projects(dest, zai_dest, cutoff):
             r2_prefix = f'{project}/{uuid}'
             uuid_dir = project_dir / uuid
             fam = _route(cache, f'{project}/{uuid}', jsonl)
-            route = zai_dest if fam == provider.ZAI else dest
+            route = routes.get(fam, dest)
 
             try:
                 if route.upload_file(jsonl, f'{r2_prefix}/{uuid}.jsonl'):
@@ -232,7 +238,7 @@ def archive_projects(dest, zai_dest, cutoff):
             if sub.name in jsonl_stems:
                 continue  # already handled in pass 1
             fam = _route(cache, f'{project}/{sub.name}', sub)
-            route = zai_dest if fam == provider.ZAI else dest
+            route = routes.get(fam, dest)
             try:
                 n_uploaded += route.upload_dir(sub, f'{project}/{sub.name}/data')
             except Exception as e:  # pylint: disable=broad-except
@@ -275,16 +281,19 @@ def main():
         client = store.client()
         dest = store.Store(client, BUCKET, log, args.dry_run)
         zai_dest = store.Store(client, ZAI_BUCKET, log, args.dry_run)
-        for each in (dest, zai_dest):
+        llama_dest = store.Store(client, LLAMA_BUCKET, log, args.dry_run)
+        stores = (dest, zai_dest, llama_dest)
+        for each in stores:
             log(f'remote inventory: {len(each.inventory()):,} objects '
                 f'in bucket {each.bucket!r}')
             log(f'manifest {store.manifest_key()}: '
                 f'{len(each.load_manifest()):,} known compressed objects')
 
-        n_up, n_del, n_fail = archive_projects(dest, zai_dest, cutoff)
+        n_up, n_del, n_fail = archive_projects(dest, zai_dest, cutoff,
+                                               llama_dest=llama_dest)
 
         if not args.dry_run:
-            for each in (dest, zai_dest):
+            for each in stores:
                 try:
                     each.save_manifest()
                 except Exception as e:  # pylint: disable=broad-except

@@ -12,11 +12,13 @@ Behaviour per run:
      Pass 1 — each *.jsonl plus its matching UUID data dir:
        the session is classified by every assistant entry's `message.model`
        and filed under the bucket of EVERY family it names — claude
-       (Anthropic), zai (GLM), llama (a local llama.cpp server). A session
-       naming no known family (only unknown model ids, or no model recorded)
-       is NOT archived anywhere: it is logged and left in place. Upload
-       (size-skip, idempotent), then delete locally if jsonl mtime > DAYS —
-       only once every family's upload succeeded.
+       (Anthropic), zai (GLM), llama (a local llama.cpp server), openrouter
+       (sessions served through OpenRouter's Anthropic-compatible endpoint,
+       recognised by their `gen-` message ids). A session naming no known
+       family (only unknown model ids, or no model recorded) is NOT archived
+       anywhere: it is logged and left in place. Upload (size-skip,
+       idempotent), then delete locally if jsonl mtime > DAYS — only once
+       every family's upload succeeded.
      Pass 2 — orphan UUID dirs (no matching jsonl, excluding memory/, tasks/):
        classified by the transcript inside them when one is there; a dir with
        no transcript records no model and is skipped like any other
@@ -57,6 +59,10 @@ ZAI_BUCKET = setting('R2_BUCKET_ZAI', 'zai')
 # Same again for sessions served by a local llama.cpp server through its
 # Anthropic-compatible endpoint: same tree, a third provider's data.
 LLAMA_BUCKET = setting('R2_BUCKET_LLAMA', 'llama')
+# And a fourth: sessions served through OpenRouter's Anthropic-compatible
+# endpoint. Their model ids name OpenRouter's catalog, so recognition runs on
+# the `gen-` assistant message id — see provider.OPENROUTER_ID_PREFIX.
+OPENROUTER_BUCKET = setting('R2_BUCKET_OPENROUTER', 'openrouter')
 
 CLAUDE_DIR = Path.home() / '.claude'
 PROJECTS_DIR = CLAUDE_DIR / 'projects'
@@ -68,7 +74,8 @@ LOCK_FILE = CLAUDE_DIR / 'cleanup-sessions.lock'
 LOG_FILE = CLAUDE_DIR / 'cleanup-sessions.log'
 # uuid -> [size at scan time, [known families], [unknown model ids]]. Local-only
 # bookkeeping beside the lock and log: losing it costs one rescan, never a
-# misroute.
+# misroute. The file wraps the entries in a versioned envelope — see
+# CACHE_FORMAT.
 PROVIDER_CACHE = CLAUDE_DIR / 'cleanup-sessions.providers.json'
 
 DAYS = runtime.DAYS
@@ -76,6 +83,16 @@ DAYS = runtime.DAYS
 # Working state, not session history — and memory/ is private notes. Neither
 # belongs in the bucket.
 NOT_SESSION_DIRS = ('memory', 'tasks')
+
+# The cache file is {'format': CACHE_FORMAT, 'entries': {uuid: entry}}.
+#
+# Format 1 — a bare {uuid: entry} dict, entries [size, [families], [unknown
+# ids]] — predates the openrouter family, so an unknown-skip entry written by
+# it would keep an unchanged OpenRouter transcript skipped forever. A file not
+# shaped exactly like the current format — format 1 included — reads as no
+# cache at all: every session rescans once, and never misroutes off a stale
+# memo.
+CACHE_FORMAT = 2
 
 
 def _entry_ok(entry):
@@ -101,6 +118,10 @@ class _ProviderCache:
     same uuid, and one that grew may name something new. Both are scanned
     again.
 
+    The file carries CACHE_FORMAT in an envelope; a file without exactly that
+    format loads as empty, so a pre-openrouter memo can never answer for a
+    session it never classified.
+
     `record` sizes with the PRE-scan stat, so a file that grows while being
     read records a size below its current one and the next run rescans —
     the growth might contain the first assistant entry.
@@ -114,8 +135,10 @@ class _ProviderCache:
             loaded = json.loads(self.path.read_text(encoding='utf-8'))
         except (OSError, ValueError):
             return
-        if isinstance(loaded, dict):
-            self.entries = {key: value for key, value in loaded.items()
+        if (isinstance(loaded, dict) and loaded.get('format') == CACHE_FORMAT
+                and isinstance(loaded.get('entries'), dict)):
+            self.entries = {key: value
+                            for key, value in loaded['entries'].items()
                             if _entry_ok(value)}
 
     def known(self, key, size):
@@ -140,7 +163,8 @@ class _ProviderCache:
         if dry_run or not self.dirty:
             return
         try:
-            body = json.dumps(self.entries, separators=(',', ':'))
+            body = json.dumps({'format': CACHE_FORMAT, 'entries': self.entries},
+                              separators=(',', ':'))
             self.path.write_text(body, encoding='utf-8')
         except OSError as e:
             log(f'provider cache save failed: {e}')
@@ -183,21 +207,25 @@ def cleanup_local(cutoff, dry_run, log):
     runtime.sweep_files(TELEMETRY_DIR, cutoff, dry_run, log)
 
 
-def archive_projects(dest, zai_dest, cutoff, llama_dest=None):
+def archive_projects(dest, zai_dest, cutoff, llama_dest=None,
+                     openrouter_dest=None):
     '''Upload every project, delete what is past the retention gate.
 
     Each session files under the bucket of EVERY model family its transcript
     names — `dest` for claude, `zai_dest` for GLM, `llama_dest` for a local
-    llama.cpp server (falling back to `dest` when no store is given, the
-    pre-1.3 call shape). A session naming no known family is not archived at
-    all: logged and left in place. Returns (uploaded, deleted, failed,
-    skipped_unknown) summed over every bucket.
+    llama.cpp server, `openrouter_dest` for a session served through
+    OpenRouter's Anthropic-compatible endpoint (each falling back to `dest`
+    when no store is given, the pre-1.3 / pre-1.5 call shapes). A session
+    naming no known family is not archived at all: logged and left in place.
+    Returns (uploaded, deleted, failed, skipped_unknown) summed over every
+    bucket.
     '''
     n_uploaded = n_deleted = n_failed = n_skipped = 0
     if not PROJECTS_DIR.is_dir():
         return 0, 0, 0, 0
     cache = _ProviderCache(PROVIDER_CACHE)
-    routes = {provider.ZAI: zai_dest, provider.LLAMA: llama_dest or dest}
+    routes = {provider.ZAI: zai_dest, provider.LLAMA: llama_dest or dest,
+              provider.OPENROUTER: openrouter_dest or dest}
 
     def targets_for(families):
         return [routes.get(family, dest) for family in sorted(families)]
@@ -326,7 +354,9 @@ def main():
         dest = store.Store(client, BUCKET, log, args.dry_run)
         zai_dest = store.Store(client, ZAI_BUCKET, log, args.dry_run)
         llama_dest = store.Store(client, LLAMA_BUCKET, log, args.dry_run)
-        stores = (dest, zai_dest, llama_dest)
+        openrouter_dest = store.Store(client, OPENROUTER_BUCKET, log,
+                                      args.dry_run)
+        stores = (dest, zai_dest, llama_dest, openrouter_dest)
         for each in stores:
             log(f'remote inventory: {len(each.inventory()):,} objects '
                 f'in bucket {each.bucket!r}')
@@ -334,7 +364,8 @@ def main():
                 f'{len(each.load_manifest()):,} known compressed objects')
 
         n_up, n_del, n_fail, n_skip = archive_projects(
-            dest, zai_dest, cutoff, llama_dest=llama_dest)
+            dest, zai_dest, cutoff, llama_dest=llama_dest,
+            openrouter_dest=openrouter_dest)
 
         if not args.dry_run:
             for each in stores:

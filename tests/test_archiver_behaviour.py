@@ -289,9 +289,9 @@ def test_non_string_settings_values_are_ignored(tmp):
 
 # --- transcript provider classification --------------------------------------
 
-def _assistant(model):
+def _assistant(model, **extra):
     return {"type": "assistant",
-            "message": {"role": "assistant", "model": model}}
+            "message": {"role": "assistant", "model": model, **extra}}
 
 
 def _jsonl_bytes(*entries):
@@ -378,6 +378,44 @@ def test_unknown_models_are_collected_and_synthetic_is_ignored(tmp):
     synthetic_and_glm.write_bytes(_jsonl_bytes(_assistant("<synthetic>"),
                                                _assistant("glm-5.3-flash")))
     assert _PROVIDER.of_file(synthetic_and_glm) == ({"zai"}, set())
+
+
+def test_a_gen_message_id_classifies_as_openrouter_whatever_the_model_names(tmp):
+    """OpenRouter's Anthropic-compatible endpoint is the only source of `gen-`
+    assistant message ids, and its model ids name OpenRouter's catalog —
+    `anthropic/claude-…` there is an OpenRouter session, not an Anthropic one.
+    So the id prefix decides the entry: the model text is never matched
+    against the needles and never counted unknown."""
+    gen_id = "gen-1758000000-abc123"
+    for index, model in enumerate((
+            "stealth/space-bunny-alpha",          # unknown to the needles
+            "anthropic/claude-opus-5",            # would match claude
+            "glm-5.3-flash",                      # would match zai
+            "nvidia/nemotron-3-ultra-550b-a55b:free")):
+        path = Path(tmp) / f"gen-{index}.jsonl"
+        path.write_bytes(_jsonl_bytes(_assistant(model, id=gen_id)))
+        assert _PROVIDER.of_file(path) == ({"openrouter"}, set()), model
+
+
+def test_an_openrouter_entry_alongside_other_families_collects_all_of_them(tmp):
+    """The gen- rule decides one entry, not the file: the other entries are
+    still read, and a session that switched providers mid-stream files under
+    every family it names."""
+    mixed = Path(tmp) / "mixed.jsonl"
+    mixed.write_bytes(_jsonl_bytes(_assistant("claude-opus-5", id="msg_01"),
+                                   _assistant("glm-5.3-flash"),
+                                   _assistant("stealth/space-bunny-alpha",
+                                              id="gen-1758000000-abc123")))
+    assert _PROVIDER.of_file(mixed) == ({"openrouter", "claude", "zai"}, set())
+
+
+def test_a_synthetic_model_with_a_gen_id_stays_ignored(tmp):
+    """`<synthetic>` is Claude Code's local placeholder — evidence of nothing
+    even when some id rides along."""
+    path = Path(tmp) / "synthetic.jsonl"
+    path.write_bytes(_jsonl_bytes(_assistant("<synthetic>",
+                                             id="gen-1758000000-abc123")))
+    assert _PROVIDER.of_file(path) == (set(), set())
 
 
 def test_a_truncated_final_line_still_classifies_from_what_precedes(tmp):

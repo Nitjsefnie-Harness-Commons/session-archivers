@@ -19,7 +19,8 @@ so a dashboard reads all three the same way. That half lives in two modules:
   * `runtime.py` — the host. Logging, the lock, the retention predicate, the
                    local scratch sweeps.
   * `provider.py` — which model families a transcript names: zai (GLM),
-                   llama (a local llama.cpp server) or claude (Anthropic).
+                   llama (a local llama.cpp server), claude (Anthropic) or
+                   openrouter (OpenRouter's Anthropic-compatible endpoint).
 
 Those two were three identical copies until 1.1.0, which was correct while
 these were standalone scripts copied onto a machine one file at a time. They
@@ -30,4 +31,4 @@ They were extracted from the agent-harness-bundle, where they ran only on
 whichever machine last exercised them by hand. Here CI runs their suite on
 every push, across the operating systems they actually run on.
 """
-__version__ = "1.4.0"
+__version__ = "1.5.0"

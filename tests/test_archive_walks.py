@@ -34,12 +34,13 @@ _STORE = _util.load_package_module("store")
 _BUCKET = "test-bucket"
 _ZAI_BUCKET = "zai-bucket"
 _LLAMA_BUCKET = "llama-bucket"
+_OPENROUTER_BUCKET = "openrouter-bucket"
 
 
-class TwoBucketS3:  # pylint: disable=too-few-public-methods
+class RoutingS3:  # pylint: disable=too-few-public-methods
     """Dispatch every call to the FakeS3 that owns the bucket it names.
 
-    The claude archiver talks to two buckets — one client, one Store per
+    The claude archiver talks to several buckets — one client, one Store per
     bucket — so its main() tests hand the stub a routing table instead of a
     single bucket. A call naming a bucket no stub owns fails here rather
     than passing quietly, which is what lets a test catch a misrouted
@@ -125,14 +126,15 @@ def _cutoff(days=3):
 
 
 def _run_main(mod, tmp, argv, client, zai_client=None, llama_client=None,
-              **attrs):
+              openrouter_client=None, **attrs):
     """Drive an archiver's main() with the stub client and a sandboxed tree.
 
-    `zai_client` / `llama_client` are for the claude archiver, which talks to
-    three buckets — one client, one Store per bucket. The stub becomes a
-    router and ZAI_BUCKET / LLAMA_BUCKET are sandboxed to the stubs' own
-    bucket names; a llama stub is made when only a zai one is given, so the
-    router owns every bucket main() opens.
+    `zai_client` / `llama_client` / `openrouter_client` are for the claude
+    archiver, which talks to four buckets — one client, one Store per bucket.
+    The stub becomes a router and ZAI_BUCKET / LLAMA_BUCKET / OPENROUTER_BUCKET
+    are sandboxed to the stubs' own bucket names; a llama and an openrouter
+    stub are made when only a zai one is given, so the router owns every
+    bucket main() opens.
     """
     saved_argv = sys.argv
     saved_client = _STORE.client
@@ -142,6 +144,9 @@ def _run_main(mod, tmp, argv, client, zai_client=None, llama_client=None,
         if llama_client is None:
             llama_client = _util.FakeS3(_LLAMA_BUCKET)
         attrs.setdefault("LLAMA_BUCKET", llama_client.bucket)
+        if openrouter_client is None:
+            openrouter_client = _util.FakeS3(_OPENROUTER_BUCKET)
+        attrs.setdefault("OPENROUTER_BUCKET", openrouter_client.bucket)
     attrs.setdefault("LOG_FILE", Path(tmp) / "archive.log")
     attrs.setdefault("LOCK_FILE", Path(tmp) / "run.lock")
     if mod is _CLAUDE:
@@ -149,7 +154,8 @@ def _run_main(mod, tmp, argv, client, zai_client=None, llama_client=None,
     try:
         sys.argv = argv
         if zai_client is not None:
-            router = TwoBucketS3(client, zai_client, llama_client)
+            router = RoutingS3(client, zai_client, llama_client,
+                               openrouter_client)
             _STORE.client = lambda: router
         else:
             _STORE.client = lambda: client
@@ -665,11 +671,105 @@ def test_claude_files_a_llama_transcript_into_the_llama_bucket(tmp):
     assert client.objects == {} and zai_client.objects == {}
 
 
-def test_claude_files_a_llama_transcript_under_claude_without_a_llama_store(tmp):
-    """The pre-1.3 call shape keeps the pre-1.3 destination."""
+def _openrouter_entries():
+    """A session served through OpenRouter's Anthropic-compatible endpoint:
+    every assistant entry carries a `gen-` message id, and the model id names
+    OpenRouter's catalog rather than the serving provider."""
+    return [
+        {"type": "user", "message": {"role": "user", "content": "hi"}},
+        {"type": "assistant",
+         "message": {"role": "assistant", "model": "stealth/space-bunny-alpha",
+                     "id": "gen-1758000000-abc123",
+                     "content": [{"type": "text", "text": "hello"}]}},
+    ]
+
+
+def test_claude_files_an_openrouter_transcript_into_the_openrouter_bucket(tmp):
     projects = Path(tmp) / "projects"
-    uuid = "zz06-llama"
-    _write(projects / "p" / f"{uuid}.jsonl", _session_body(_llama_entries()))
+    uuid = "oo00-openrouter"
+    jsonl = _write(projects / "p" / f"{uuid}.jsonl",
+                   _session_body(_openrouter_entries()), days_old=10)
+    data = _write(projects / "p" / uuid / "blob.json", "{}")
+    dest, zai, client, zai_client, said = _dests()
+    openrouter_client = _util.FakeS3(_OPENROUTER_BUCKET)
+    openrouter = _STORE.Store(openrouter_client, _OPENROUTER_BUCKET,
+                              said.append, False)
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(),
+                                        openrouter_dest=openrouter) == (2, 1, 0, 0)
+    assert not jsonl.exists() and not data.parent.exists()
+    assert f"p/{uuid}/{uuid}.jsonl.xz" in openrouter_client.objects
+    assert f"p/{uuid}/data/blob.json.xz" in openrouter_client.objects
+    assert client.objects == {} and zai_client.objects == {}
+
+
+def test_claude_files_an_openrouter_and_claude_session_into_both_buckets(tmp):
+    """A session both Anthropic and OpenRouter served files under both
+    buckets — the gen- entry earns openrouter without demoting the claude
+    entries around it."""
+    projects = Path(tmp) / "projects"
+    uuid = "oo01-mixed"
+    entries = [
+        {"type": "user", "message": {"role": "user", "content": "hi"}},
+        {"type": "assistant",
+         "message": {"role": "assistant", "model": "claude-opus-5",
+                     "id": "msg_01abc",
+                     "content": [{"type": "text", "text": "hello"}]}},
+        {"type": "assistant",
+         "message": {"role": "assistant", "model": "stealth/space-bunny-alpha",
+                     "id": "gen-1758000000-abc123",
+                     "content": [{"type": "text", "text": "hello"}]}},
+    ]
+    _write(projects / "p" / f"{uuid}.jsonl", _session_body(entries))
+    dest, zai, client, zai_client, said = _dests()
+    openrouter_client = _util.FakeS3(_OPENROUTER_BUCKET)
+    openrouter = _STORE.Store(openrouter_client, _OPENROUTER_BUCKET,
+                              said.append, False)
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(1),
+                                        openrouter_dest=openrouter) == (2, 0, 0, 0)
+    assert f"p/{uuid}/{uuid}.jsonl.xz" in client.objects
+    assert f"p/{uuid}/{uuid}.jsonl.xz" in openrouter_client.objects
+    assert zai_client.objects == {}
+
+
+def test_claude_rescans_a_pre_1_5_cache_entry_for_an_openrouter_session(tmp):
+    """A 1.4 cache entry for an OpenRouter session is [size, [], [ids]] — an
+    unknown-skip — and an unchanged-size hit on it would keep the session
+    skipped forever. The versioned cache format drops the whole pre-1.5 file
+    on the floor (one rescan per session, never a misroute), so this session
+    is rescanned and reaches the openrouter bucket."""
+    projects = Path(tmp) / "projects"
+    uuid = "oo02-cache"
+    body = _session_body(_openrouter_entries())
+    jsonl = _write(projects / "p" / f"{uuid}.jsonl", body, days_old=10)
+    cache = Path(tmp) / "providers.json"
+    cache.write_text(json.dumps(
+        {f"p/{uuid}": [len(body), [], ["stealth/space-bunny-alpha"]]}))
+    dest, zai, client, zai_client, said = _dests()
+    openrouter_client = _util.FakeS3(_OPENROUTER_BUCKET)
+    openrouter = _STORE.Store(openrouter_client, _OPENROUTER_BUCKET,
+                              said.append, False)
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(),
+                                        openrouter_dest=openrouter) == (1, 1, 0, 0)
+    assert not jsonl.exists()
+    assert f"p/{uuid}/{uuid}.jsonl.xz" in openrouter_client.objects
+    assert client.objects == {} and zai_client.objects == {}
+    saved = json.loads(cache.read_text(encoding="utf-8"))
+    assert saved["format"] == 2
+    assert saved["entries"][f"p/{uuid}"][1] == ["openrouter"]
+    assert saved["entries"][f"p/{uuid}"][2] == []
+
+
+def test_claude_files_an_openrouter_transcript_under_claude_without_a_store(tmp):
+    """The pre-1.5 call shape keeps the pre-1.5 destination — the fallback
+    every family's store shares."""
+    projects = Path(tmp) / "projects"
+    uuid = "oo03-fallback"
+    _write(projects / "p" / f"{uuid}.jsonl", _session_body(_openrouter_entries()))
     dest, zai, client, zai_client, _ = _dests()
     with sandbox(_CLAUDE, PROJECTS_DIR=projects,
                  PROVIDER_CACHE=Path(tmp) / "providers.json"):
@@ -726,8 +826,10 @@ def test_claude_rescans_a_grown_session_that_gained_a_family(tmp):
     new_body = old_body + _session_for("glm-5.3-flash")
     _write(projects / "p" / f"{uuid}.jsonl", new_body)
     cache = Path(tmp) / "providers.json"
-    # Cached when the file was smaller and named only claude.
-    cache.write_text(json.dumps({"p/zz06-cache": [len(old_body), ["claude"], []]}))
+    # Cached, in the current format, when the file was smaller and named
+    # only claude.
+    cache.write_text(json.dumps(
+        {"format": 2, "entries": {"p/zz06-cache": [len(old_body), ["claude"], []]}}))
     dest, zai, client, zai_client, _ = _dests()
     with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (2, 0, 0, 0)
@@ -742,8 +844,8 @@ def test_claude_reuses_the_cache_for_an_unchanged_session(tmp):
     body = _session_for("glm-5.3-flash")
     _write(projects / "p" / f"{uuid}.jsonl", body)
     cache = Path(tmp) / "providers.json"
-    cache.write_text(
-        json.dumps({"p/zz08-cache": [len(body), ["zai"], []]}))
+    cache.write_text(json.dumps(
+        {"format": 2, "entries": {"p/zz08-cache": [len(body), ["zai"], []]}}))
     dest, zai, client, zai_client, _ = _dests()
     with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0, 0)
@@ -758,8 +860,10 @@ def test_claude_reuses_a_cached_skip_for_an_unchanged_unknown_session(tmp):
     body = _session_for("stealth/space-bunny-alpha")
     _write(projects / "p" / f"{uuid}.jsonl", body)
     cache = Path(tmp) / "providers.json"
-    cache.write_text(
-        json.dumps({"p/zz09-quiet": [len(body), [], ["stealth/space-bunny-alpha"]]}))
+    cache.write_text(json.dumps(
+        {"format": 2,
+         "entries": {"p/zz09-quiet": [len(body), [],
+                                      ["stealth/space-bunny-alpha"]]}}))
     dest, zai, client, zai_client, said = _dests()
     with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (0, 0, 0, 1)
@@ -780,7 +884,9 @@ def test_claude_rescans_an_old_format_cache_entry(tmp):
     with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0, 0)
     assert f"p/{uuid}/{uuid}.jsonl.xz" in zai_client.objects
-    entry = json.loads(cache.read_text(encoding="utf-8"))["p/zz10-oldfmt"]
+    saved = json.loads(cache.read_text(encoding="utf-8"))
+    assert saved["format"] == 2
+    entry = saved["entries"]["p/zz10-oldfmt"]
     assert entry[1] == ["zai"] and entry[2] == []
 
 
@@ -817,7 +923,9 @@ def test_claude_a_real_run_persists_the_provider_cache(tmp):
     dest, zai, _, _, _ = _dests()
     with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0, 0)
-    entry = json.loads(cache.read_text(encoding="utf-8"))["p/zz10-real"]
+    saved = json.loads(cache.read_text(encoding="utf-8"))
+    assert saved["format"] == 2
+    entry = saved["entries"]["p/zz10-real"]
     assert entry[1] == ["zai"] and entry[2] == []
 
 
@@ -842,6 +950,25 @@ def test_claude_main_files_each_provider_into_its_own_bucket(tmp):
     for each in (client, zai_client, llama_client):
         assert _STORE.manifest_key() in each.objects
     assert "done — uploaded=3 deleted=0 failures=0 skipped_unknown=0" in out
+
+
+def test_claude_main_files_an_openrouter_session_into_its_own_bucket(tmp):
+    projects = Path(tmp) / "projects"
+    _write(projects / "p" / "or-session.jsonl",
+           _session_body(_openrouter_entries()))
+    client = _util.FakeS3(_BUCKET)
+    openrouter_client = _util.FakeS3(_OPENROUTER_BUCKET)
+    code, out = _run_main(
+        _CLAUDE, tmp, ["archive-claude-sessions", "--days", "3"], client,
+        zai_client=_util.FakeS3(_ZAI_BUCKET), openrouter_client=openrouter_client,
+        PROJECTS_DIR=projects, DEBUG_DIR=Path(tmp) / "absent",
+        FILE_HISTORY_DIR=Path(tmp) / "absent", TELEMETRY_DIR=Path(tmp) / "absent")
+    assert code == 0
+    assert "p/or-session/or-session.jsonl.xz" in openrouter_client.objects
+    assert "p/or-session/or-session.jsonl.xz" not in client.objects
+    for each in (client, openrouter_client):
+        assert _STORE.manifest_key() in each.objects
+    assert "done — uploaded=1 deleted=0 failures=0 skipped_unknown=0" in out
 
 
 # --- codex ---------------------------------------------------------------------------

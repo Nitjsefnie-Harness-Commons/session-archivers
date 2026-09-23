@@ -1,13 +1,15 @@
 """Which model families wrote a transcript: zai (GLM), llama (a local
-llama.cpp server) or claude (Anthropic).
+llama.cpp server), claude (Anthropic) or openrouter (OpenRouter's
+Anthropic-compatible endpoint).
 
 The claude archiver walks one tree that mixes them — Claude Code sessions can
-be powered by Anthropic's models, by GLM served through a z.ai endpoint, or by
-a GGUF served through llama.cpp's Anthropic-compatible endpoint — and they
-must not land in the same bucket. The classifier reads only what
-an assistant entry itself recorded — `type: "assistant"` and `message.model`
-— and never body text: a session discussing "claude-opus-5" while running on
-GLM (or the reverse) is exactly the transcript a substring scan would misfile.
+be powered by Anthropic's models, by GLM served through a z.ai endpoint, by a
+GGUF served through llama.cpp's Anthropic-compatible endpoint, or by any model
+served through OpenRouter's — and they must not land in the same bucket. The
+classifier reads only what an assistant entry itself recorded — `type:
+"assistant"` and `message.model` — and never body text: a session discussing
+"claude-opus-5" while running on GLM (or the reverse) is exactly the
+transcript a substring scan would misfile.
 
 Classification collects EVERYTHING the transcript names: every assistant
 entry's model is read, so the result is the set of known families present
@@ -26,6 +28,7 @@ import json
 ZAI = 'zai'
 LLAMA = 'llama'
 CLAUDE = 'claude'
+OPENROUTER = 'openrouter'
 
 # A llama.cpp server reports whatever alias it was started with, so this names
 # the models actually served that way rather than the server: add a needle
@@ -45,9 +48,18 @@ KNOWN_FAMILIES = (
 # session, so it counts as neither a known family nor an unknown id.
 SYNTHETIC_MODEL = '<synthetic>'
 
+# OpenRouter's Anthropic-compatible endpoint is the only source of assistant
+# message ids starting `gen-`, and its model ids name OpenRouter's catalog —
+# `anthropic/claude-…` among them — so the id prefix decides the entry and the
+# model text is never needle-matched: an OpenRouter-served claude model is an
+# OpenRouter session, not an Anthropic one.
+OPENROUTER_ID_PREFIX = 'gen-'
+
 
 def from_model(model):
-    """'zai', 'llama' or 'claude' when `model` names a known family, else None."""
+    """'zai', 'llama' or 'claude' when `model` names a known family, else
+    None. An openrouter entry never reaches here: `of_file` decides it from
+    the `gen-` message id before any needle is consulted."""
     lowered = str(model or '').lower()
     for needle, family in KNOWN_FAMILIES:
         if needle in lowered:
@@ -62,6 +74,10 @@ def of_file(path):
     decides, because a session can switch harnesses mid-stream and every
     family named earns the transcript in its bucket. Only non-empty string
     models are collected; `<synthetic>` is skipped outright.
+
+    An entry whose `message.id` starts `gen-` was served by OpenRouter: it is
+    family openrouter, and its model id is neither needle-matched nor counted
+    unknown.
 
     Lines are read as bytes and parsed one at a time: a transcript being
     written by a live session can end mid-line, and one unparseable line
@@ -87,6 +103,11 @@ def of_file(path):
                 if not isinstance(model, str) or not model:
                     continue
                 if model.lower() == SYNTHETIC_MODEL:
+                    continue
+                entry_id = message.get('id')
+                if (isinstance(entry_id, str)
+                        and entry_id.startswith(OPENROUTER_ID_PREFIX)):
+                    families.add(OPENROUTER)
                     continue
                 found = from_model(model)
                 if found:

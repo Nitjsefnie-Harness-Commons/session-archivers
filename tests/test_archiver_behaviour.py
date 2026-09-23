@@ -303,44 +303,47 @@ def test_a_glm_model_classifies_as_zai(tmp):
     path.write_bytes(_jsonl_bytes(
         {"type": "user", "message": {"role": "user", "content": "hi"}},
         _assistant("glm-5.3-flash")))
-    assert _PROVIDER.of_file(path) == "zai"
+    assert _PROVIDER.of_file(path) == ({"zai"}, set())
 
 
 def test_a_bonsai_model_classifies_as_llama(tmp):
     """bonsai-2-27b is what a llama.cpp server reports for that GGUF."""
     path = Path(tmp) / "s.jsonl"
     path.write_bytes(_jsonl_bytes(_assistant("bonsai-2-27b")))
-    assert _PROVIDER.of_file(path) == "llama"
+    assert _PROVIDER.of_file(path) == ({"llama"}, set())
 
 
 def test_a_llama_model_classifies_as_llama(tmp):
     path = Path(tmp) / "s.jsonl"
     path.write_bytes(_jsonl_bytes(_assistant("llama-3.3-70b")))
-    assert _PROVIDER.of_file(path) == "llama"
+    assert _PROVIDER.of_file(path) == ({"llama"}, set())
 
 
 def test_a_claude_model_classifies_as_claude(tmp):
     path = Path(tmp) / "s.jsonl"
     path.write_bytes(_jsonl_bytes(_assistant("claude-opus-5")))
-    assert _PROVIDER.of_file(path) == "claude"
+    assert _PROVIDER.of_file(path) == ({"claude"}, set())
 
 
 def test_a_fable_model_also_classifies_as_claude(tmp):
     path = Path(tmp) / "s.jsonl"
     path.write_bytes(_jsonl_bytes(_assistant("claude-fable-5")))
-    assert _PROVIDER.of_file(path) == "claude"
+    assert _PROVIDER.of_file(path) == ({"claude"}, set())
 
 
-def test_the_first_classified_entry_decides(tmp):
+def test_every_family_present_is_collected_not_just_the_first(tmp):
+    """A session can switch harnesses mid-stream, so the scan reads every
+    assistant entry and returns EVERY family it names — the first no longer
+    decides, and file order does not matter."""
     glm_first = Path(tmp) / "glm-first.jsonl"
     glm_first.write_bytes(_jsonl_bytes(_assistant("glm-5.3-flash"),
                                        _assistant("claude-opus-5")))
-    assert _PROVIDER.of_file(glm_first) == "zai"
+    assert _PROVIDER.of_file(glm_first) == ({"zai", "claude"}, set())
 
     claude_first = Path(tmp) / "claude-first.jsonl"
     claude_first.write_bytes(_jsonl_bytes(_assistant("claude-opus-5"),
                                           _assistant("glm-5.3-flash")))
-    assert _PROVIDER.of_file(claude_first) == "claude"
+    assert _PROVIDER.of_file(claude_first) == ({"zai", "claude"}, set())
 
 
 def test_a_model_mention_in_user_text_never_classifies(tmp):
@@ -349,29 +352,43 @@ def test_a_model_mention_in_user_text_never_classifies(tmp):
     path.write_bytes(_jsonl_bytes(
         {"type": "user", "message": {"role": "user",
          "content": 'run this on "model":"claude-opus-5" please'}}))
-    assert _PROVIDER.of_file(path) is None
+    assert _PROVIDER.of_file(path) == (set(), set())
 
 
-def test_unknown_models_are_skipped_until_a_known_one(tmp):
-    path = Path(tmp) / "s.jsonl"
-    path.write_bytes(_jsonl_bytes(_assistant("<synthetic>"),
-                                  _assistant("glm-5.3-flash")))
-    assert _PROVIDER.of_file(path) == "zai"
+def test_unknown_models_are_collected_and_synthetic_is_ignored(tmp):
+    """Unknown ids come back so the caller can log them; `<synthetic>` is
+    Claude Code's placeholder for locally generated messages and counts as
+    neither known nor unknown."""
+    mixed = Path(tmp) / "s.jsonl"
+    mixed.write_bytes(_jsonl_bytes(_assistant("glm-5.3-flash"),
+                                   _assistant("stealth/space-bunny-alpha")))
+    assert _PROVIDER.of_file(mixed) == ({"zai"}, {"stealth/space-bunny-alpha"})
 
     only_unknown = Path(tmp) / "unknown.jsonl"
-    only_unknown.write_bytes(_jsonl_bytes(_assistant("<synthetic>")))
-    assert _PROVIDER.of_file(only_unknown) is None
+    only_unknown.write_bytes(
+        _jsonl_bytes(_assistant("nvidia/nemotron-3-ultra-550b-a55b:free")))
+    assert _PROVIDER.of_file(only_unknown) == (
+        set(), {"nvidia/nemotron-3-ultra-550b-a55b:free"})
+
+    synthetic = Path(tmp) / "synthetic.jsonl"
+    synthetic.write_bytes(_jsonl_bytes(_assistant("<synthetic>")))
+    assert _PROVIDER.of_file(synthetic) == (set(), set())
+
+    synthetic_and_glm = Path(tmp) / "synthetic-glm.jsonl"
+    synthetic_and_glm.write_bytes(_jsonl_bytes(_assistant("<synthetic>"),
+                                               _assistant("glm-5.3-flash")))
+    assert _PROVIDER.of_file(synthetic_and_glm) == ({"zai"}, set())
 
 
 def test_a_truncated_final_line_still_classifies_from_what_precedes(tmp):
     body = _jsonl_bytes(_assistant("claude-opus-5")) + b'{"type": "as'
     path = Path(tmp) / "s.jsonl"
     path.write_bytes(body)
-    assert _PROVIDER.of_file(path) == "claude"
+    assert _PROVIDER.of_file(path) == ({"claude"}, set())
 
 
 def test_an_absent_transcript_classifies_as_none(tmp):
-    assert _PROVIDER.of_file(Path(tmp) / "nope.jsonl") is None
+    assert _PROVIDER.of_file(Path(tmp) / "nope.jsonl") == (set(), set())
 
 
 def test_transcript_in_takes_the_first_jsonl(tmp):

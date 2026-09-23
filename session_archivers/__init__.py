@@ -5,8 +5,10 @@ Kimi by working directory, Codex in date buckets — so the three walks are
 separate modules rather than one parameterised routine. Each also keeps its
 own destination: R2_BUCKET_CLAUDE, R2_BUCKET_KIMI and R2_BUCKET_CODEX are
 different buckets, and nothing here merges them. The Claude tree is split one
-step further by provider — a GLM-powered session files under R2_BUCKET_ZAI,
-not among the Anthropic ones.
+step further by provider — a session files under the bucket of EVERY model
+family its transcript names, so a session both Claude Code and GLM wrote
+lands in R2_BUCKET_CLAUDE and R2_BUCKET_ZAI alike, and one naming no known
+family is skipped entirely rather than filed somewhere plausible.
 
 What the three DO share is the way each one is written to — one key layout,
 one compression policy, one per-machine manifest, one single-instance lock —
@@ -16,8 +18,8 @@ so a dashboard reads all three the same way. That half lives in two modules:
                    upload forms. Takes the bucket name as an argument.
   * `runtime.py` — the host. Logging, the lock, the retention predicate, the
                    local scratch sweeps.
-  * `provider.py` — which model family wrote a transcript: zai (GLM) or
-                   claude (Anthropic).
+  * `provider.py` — which model families a transcript names: zai (GLM),
+                   llama (a local llama.cpp server) or claude (Anthropic).
 
 Those two were three identical copies until 1.1.0, which was correct while
 these were standalone scripts copied onto a machine one file at a time. They
@@ -28,4 +30,4 @@ They were extracted from the agent-harness-bundle, where they ran only on
 whichever machine last exercised them by hand. Here CI runs their suite on
 every push, across the operating systems they actually run on.
 """
-__version__ = "1.3.0"
+__version__ = "1.4.0"

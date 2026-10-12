@@ -554,19 +554,19 @@ def test_claude_keeps_a_multi_family_session_when_one_upload_failed(tmp):
 
 
 def test_claude_archives_a_known_session_and_logs_its_unknown_ids(tmp):
-    """OpenRouter ids ride along: the known bucket gets the session, the log
+    """Unknown ids ride along: the known bucket gets the session, the log
     names what else was in it."""
     projects = Path(tmp) / "projects"
     uuid = "mm04-known-unknown"
     _write(projects / "p" / f"{uuid}.jsonl",
-           _session_for("claude-opus-5", "thinkingmachines/inkling:free"))
+           _session_for("claude-opus-5", "mystery-model-7b"))
     dest, zai, client, zai_client, said = _dests()
     with sandbox(_CLAUDE, PROJECTS_DIR=projects,
                  PROVIDER_CACHE=Path(tmp) / "providers.json"):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0, 0)
     assert f"p/{uuid}/{uuid}.jsonl.xz" in client.objects
     assert zai_client.objects == {}
-    assert any("thinkingmachines/inkling:free" in line for line in said)
+    assert any("mystery-model-7b" in line for line in said)
 
 
 def test_claude_skips_a_session_only_unknown_models_recorded(tmp):
@@ -574,7 +574,7 @@ def test_claude_skips_a_session_only_unknown_models_recorded(tmp):
     projects = Path(tmp) / "projects"
     uuid = "mm05-unknown"
     jsonl = _write(projects / "p" / f"{uuid}.jsonl",
-                   _session_for("stealth/space-bunny-alpha"), days_old=10)
+                   _session_for("mystery-model-7b"), days_old=10)
     data = _write(projects / "p" / uuid / "blob.json", "{}")
     dest, zai, client, zai_client, said = _dests()
     with sandbox(_CLAUDE, PROJECTS_DIR=projects,
@@ -583,7 +583,7 @@ def test_claude_skips_a_session_only_unknown_models_recorded(tmp):
     assert jsonl.exists() and data.exists()
     assert client.objects == {} and zai_client.objects == {}
     assert any("skipped unknown-model session" in line
-               and "stealth/space-bunny-alpha" in line for line in said)
+               and "mystery-model-7b" in line for line in said)
 
 
 def test_claude_skips_a_session_with_no_model_recorded(tmp):
@@ -759,9 +759,47 @@ def test_claude_rescans_a_pre_1_5_cache_entry_for_an_openrouter_session(tmp):
     assert f"p/{uuid}/{uuid}.jsonl.xz" in openrouter_client.objects
     assert client.objects == {} and zai_client.objects == {}
     saved = json.loads(cache.read_text(encoding="utf-8"))
-    assert saved["format"] == 2
+    assert saved["format"] == 3
     assert saved["entries"][f"p/{uuid}"][1] == ["openrouter"]
     assert saved["entries"][f"p/{uuid}"][2] == []
+
+
+def test_claude_rescans_a_1_5_cache_skip_for_a_msg_id_openrouter_session(tmp):
+    """OpenRouter now answers with `msg_` ids, so 1.5 classified its sessions
+    by model id alone and cached them as unknown-skips: [size, [], [slug]].
+    An unchanged-size hit on that memo would keep the session skipped
+    forever, so the format moves on and the 1.5 file reads as no cache: the
+    session is rescanned, recognised by its catalog slug and archived."""
+    projects = Path(tmp) / "projects"
+    uuid = "oo04-msgid"
+    entries = [
+        {"type": "user", "message": {"role": "user", "content": "hi"}},
+        {"type": "assistant",
+         "message": {"role": "assistant",
+                     "model": "deepseek/deepseek-v4.1-flash",
+                     "id": "msg_zqqRuytZUGqNTA9ftW5V",
+                     "content": [{"type": "text", "text": "hello"}]}},
+    ]
+    body = _session_body(entries)
+    jsonl = _write(projects / "p" / f"{uuid}.jsonl", body, days_old=10)
+    cache = Path(tmp) / "providers.json"
+    cache.write_text(json.dumps(
+        {"format": 2,
+         "entries": {f"p/{uuid}": [len(body), [],
+                                   ["deepseek/deepseek-v4.1-flash"]]}}))
+    dest, zai, client, zai_client, said = _dests()
+    openrouter_client = _util.FakeS3(_OPENROUTER_BUCKET)
+    openrouter = _STORE.Store(openrouter_client, _OPENROUTER_BUCKET,
+                              said.append, False)
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff(),
+                                        openrouter_dest=openrouter) == (1, 1, 0, 0)
+    assert not jsonl.exists()
+    assert f"p/{uuid}/{uuid}.jsonl.xz" in openrouter_client.objects
+    assert client.objects == {} and zai_client.objects == {}
+    saved = json.loads(cache.read_text(encoding="utf-8"))
+    assert saved["format"] == 3
+    assert saved["entries"][f"p/{uuid}"][1:] == [["openrouter"], []]
 
 
 def test_claude_files_an_openrouter_transcript_under_claude_without_a_store(tmp):
@@ -829,7 +867,7 @@ def test_claude_rescans_a_grown_session_that_gained_a_family(tmp):
     # Cached, in the current format, when the file was smaller and named
     # only claude.
     cache.write_text(json.dumps(
-        {"format": 2, "entries": {"p/zz06-cache": [len(old_body), ["claude"], []]}}))
+        {"format": 3, "entries": {"p/zz06-cache": [len(old_body), ["claude"], []]}}))
     dest, zai, client, zai_client, _ = _dests()
     with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (2, 0, 0, 0)
@@ -845,7 +883,7 @@ def test_claude_reuses_the_cache_for_an_unchanged_session(tmp):
     _write(projects / "p" / f"{uuid}.jsonl", body)
     cache = Path(tmp) / "providers.json"
     cache.write_text(json.dumps(
-        {"format": 2, "entries": {"p/zz08-cache": [len(body), ["zai"], []]}}))
+        {"format": 3, "entries": {"p/zz08-cache": [len(body), ["zai"], []]}}))
     dest, zai, client, zai_client, _ = _dests()
     with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0, 0)
@@ -857,13 +895,13 @@ def test_claude_reuses_a_cached_skip_for_an_unchanged_unknown_session(tmp):
     """Unknown last time and byte-identical since: skip again, no rescan."""
     projects = Path(tmp) / "projects"
     uuid = "zz09-quiet"
-    body = _session_for("stealth/space-bunny-alpha")
+    body = _session_for("mystery-model-7b")
     _write(projects / "p" / f"{uuid}.jsonl", body)
     cache = Path(tmp) / "providers.json"
     cache.write_text(json.dumps(
-        {"format": 2,
+        {"format": 3,
          "entries": {"p/zz09-quiet": [len(body), [],
-                                      ["stealth/space-bunny-alpha"]]}}))
+                                      ["mystery-model-7b"]]}}))
     dest, zai, client, zai_client, said = _dests()
     with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (0, 0, 0, 1)
@@ -885,7 +923,7 @@ def test_claude_rescans_an_old_format_cache_entry(tmp):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0, 0)
     assert f"p/{uuid}/{uuid}.jsonl.xz" in zai_client.objects
     saved = json.loads(cache.read_text(encoding="utf-8"))
-    assert saved["format"] == 2
+    assert saved["format"] == 3
     entry = saved["entries"]["p/zz10-oldfmt"]
     assert entry[1] == ["zai"] and entry[2] == []
 
@@ -924,7 +962,7 @@ def test_claude_a_real_run_persists_the_provider_cache(tmp):
     with sandbox(_CLAUDE, PROJECTS_DIR=projects, PROVIDER_CACHE=cache):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff(1)) == (1, 0, 0, 0)
     saved = json.loads(cache.read_text(encoding="utf-8"))
-    assert saved["format"] == 2
+    assert saved["format"] == 3
     entry = saved["entries"]["p/zz10-real"]
     assert entry[1] == ["zai"] and entry[2] == []
 

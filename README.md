@@ -86,11 +86,15 @@ The archiver reads only what an assistant entry itself recorded — the
 a GLM session discussing "claude-opus-5" (or the reverse) is exactly what a
 substring scan misfiles. Every assistant entry is read, and the session files
 under the bucket of EVERY family it names, because a transcript that switched
-harnesses mid-stream names more than one. An entry whose `message.id` starts
-`gen-` was served through OpenRouter's Anthropic-compatible endpoint, whose
-model ids name OpenRouter's catalog (`anthropic/claude-…` among them) — so
-the id decides, the model text is never matched, and the entry is never
-counted unknown. Otherwise the model text matches the known needles
+harnesses mid-stream names more than one. An entry served through
+OpenRouter's Anthropic-compatible endpoint is recognised by a `gen-`
+`message.id` or, since that endpoint also answers with `msg_` ids, by a model
+id shaped like an OpenRouter catalog slug (`vendor/model`, optionally
+`:variant`; `anthropic/claude-…` among them). Either decides the entry: the
+model text is never matched against the needles, and the entry is never
+counted unknown. A path-shaped id (a llama.cpp server started without an
+alias, `.gguf`, more than one `/`) is not a slug. Otherwise the model text
+matches the known needles
 (`glm` → zai, `bonsai`/`llama` → llama, `claude`/`anthropic` → claude).
 A transcript that names no known family — a session that never got a reply,
 say — is not archived anywhere: it is logged and left in place. A llama.cpp

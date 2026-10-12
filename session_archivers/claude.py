@@ -92,7 +92,12 @@ NOT_SESSION_DIRS = ('memory', 'tasks')
 # shaped exactly like the current format — format 1 included — reads as no
 # cache at all: every session rescans once, and never misroutes off a stale
 # memo.
-CACHE_FORMAT = 2
+#
+# Format 2 recognised OpenRouter only by `gen-` message ids. Its endpoint now
+# also answers with `msg_` ids, so format 2 cached those sessions as
+# unknown-skips; format 3 recognises the catalog slug too, and moving the
+# format on is what lets an unchanged session of that kind be rescanned.
+CACHE_FORMAT = 3
 
 
 def _entry_ok(entry):

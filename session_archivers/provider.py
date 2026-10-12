@@ -24,6 +24,7 @@ entirely: it is never uploaded, never deleted, and logged instead.
 """
 
 import json
+import re
 
 ZAI = 'zai'
 LLAMA = 'llama'
@@ -55,11 +56,29 @@ SYNTHETIC_MODEL = '<synthetic>'
 # OpenRouter session, not an Anthropic one.
 OPENROUTER_ID_PREFIX = 'gen-'
 
+# The prefix alone no longer marks every OpenRouter entry: its endpoint has
+# since answered with `msg_` ids shaped like Anthropic's. Its model ids still
+# name OpenRouter's catalog — `vendor/model`, optionally `:variant` — a shape
+# no Anthropic or z.ai id and no llama.cpp alias takes, so the slug decides an
+# entry exactly like the prefix does. A llama.cpp server started without an
+# alias reports the path it loaded; a path (more than one `/`, a leading `/`,
+# a `.gguf` file) is not a slug and falls through to the needles.
+OPENROUTER_SLUG = re.compile(
+    r'[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*(:[a-z0-9._-]+)?')
+
+
+def is_openrouter_slug(model):
+    """Whether `model` has the shape of an OpenRouter catalog id."""
+    lowered = str(model or '').lower()
+    return (OPENROUTER_SLUG.fullmatch(lowered) is not None
+            and not lowered.endswith('.gguf'))
+
 
 def from_model(model):
     """'zai', 'llama' or 'claude' when `model` names a known family, else
     None. An openrouter entry never reaches here: `of_file` decides it from
-    the `gen-` message id before any needle is consulted."""
+    the `gen-` message id or the catalog slug before any needle is
+    consulted."""
     lowered = str(model or '').lower()
     for needle, family in KNOWN_FAMILIES:
         if needle in lowered:
@@ -75,8 +94,9 @@ def of_file(path):
     family named earns the transcript in its bucket. Only non-empty string
     models are collected; `<synthetic>` is skipped outright.
 
-    An entry whose `message.id` starts `gen-` was served by OpenRouter: it is
-    family openrouter, and its model id is neither needle-matched nor counted
+    An entry whose `message.id` starts `gen-`, or whose model id is an
+    OpenRouter catalog slug, was served by OpenRouter: it is family
+    openrouter, and its model id is neither needle-matched nor counted
     unknown.
 
     Lines are read as bytes and parsed one at a time: a transcript being
@@ -105,8 +125,9 @@ def of_file(path):
                 if model.lower() == SYNTHETIC_MODEL:
                     continue
                 entry_id = message.get('id')
-                if (isinstance(entry_id, str)
-                        and entry_id.startswith(OPENROUTER_ID_PREFIX)):
+                if ((isinstance(entry_id, str)
+                        and entry_id.startswith(OPENROUTER_ID_PREFIX))
+                        or is_openrouter_slug(model)):
                     families.add(OPENROUTER)
                     continue
                 found = from_model(model)

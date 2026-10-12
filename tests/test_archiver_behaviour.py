@@ -361,14 +361,12 @@ def test_unknown_models_are_collected_and_synthetic_is_ignored(tmp):
     neither known nor unknown."""
     mixed = Path(tmp) / "s.jsonl"
     mixed.write_bytes(_jsonl_bytes(_assistant("glm-5.3-flash"),
-                                   _assistant("stealth/space-bunny-alpha")))
-    assert _PROVIDER.of_file(mixed) == ({"zai"}, {"stealth/space-bunny-alpha"})
+                                   _assistant("mystery-model-7b")))
+    assert _PROVIDER.of_file(mixed) == ({"zai"}, {"mystery-model-7b"})
 
     only_unknown = Path(tmp) / "unknown.jsonl"
-    only_unknown.write_bytes(
-        _jsonl_bytes(_assistant("nvidia/nemotron-3-ultra-550b-a55b:free")))
-    assert _PROVIDER.of_file(only_unknown) == (
-        set(), {"nvidia/nemotron-3-ultra-550b-a55b:free"})
+    only_unknown.write_bytes(_jsonl_bytes(_assistant("qwen-4-coder")))
+    assert _PROVIDER.of_file(only_unknown) == (set(), {"qwen-4-coder"})
 
     synthetic = Path(tmp) / "synthetic.jsonl"
     synthetic.write_bytes(_jsonl_bytes(_assistant("<synthetic>")))
@@ -407,6 +405,41 @@ def test_an_openrouter_entry_alongside_other_families_collects_all_of_them(tmp):
                                    _assistant("stealth/space-bunny-alpha",
                                               id="gen-1758000000-abc123")))
     assert _PROVIDER.of_file(mixed) == ({"openrouter", "claude", "zai"}, set())
+
+
+def test_an_openrouter_catalog_slug_classifies_as_openrouter_whatever_the_id(tmp):
+    """OpenRouter's endpoint now answers with `msg_` ids like Anthropic's, so
+    the `gen-` prefix no longer marks every OpenRouter entry. Its model ids
+    still name OpenRouter's catalog — `vendor/model`, optionally `:variant` —
+    a shape no Anthropic, z.ai or llama.cpp alias takes, so the slug decides
+    the entry before any needle: `anthropic/claude-…` and `meta-llama/…`
+    there are OpenRouter sessions, not Anthropic or llama ones."""
+    for index, model in enumerate((
+            "deepseek/deepseek-v4.1-flash",
+            "xiaomi/mimo-v2.6-flash",
+            "inclusionai/ling-3.1-flash",
+            "stealth/space-bunny-alpha",
+            "anthropic/claude-opus-5",            # would match claude
+            "meta-llama/llama-4-maverick",        # would match llama
+            "z-ai/glm-5.3",                       # would match zai
+            "nvidia/nemotron-3-ultra-550b-a55b:free")):
+        path = Path(tmp) / f"slug-{index}.jsonl"
+        path.write_bytes(_jsonl_bytes(
+            _assistant(model, id="msg_zqqRuytZUGqNTA9ftW5V")))
+        assert _PROVIDER.of_file(path) == ({"openrouter"}, set()), model
+
+
+def test_a_path_shaped_model_id_is_not_an_openrouter_slug(tmp):
+    """A llama.cpp server started without an alias reports the model path it
+    loaded. A path is not a catalog slug: it keeps its needle family, or
+    stays unknown, and never lands in the openrouter bucket."""
+    for index, (model, expected) in enumerate((
+            ("/models/llama-3.3-70b.gguf", ({"llama"}, set())),
+            ("models/bonsai-2-27b.gguf", ({"llama"}, set())),
+            ("a/b/c", (set(), {"a/b/c"})))):
+        path = Path(tmp) / f"path-{index}.jsonl"
+        path.write_bytes(_jsonl_bytes(_assistant(model)))
+        assert _PROVIDER.of_file(path) == expected, model
 
 
 def test_a_synthetic_model_with_a_gen_id_stays_ignored(tmp):

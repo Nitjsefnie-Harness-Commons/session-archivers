@@ -3,4 +3,4 @@
 # only; boto3 is the one runtime dep, declared in pyproject.toml.
 pycodestyle==2.14.0
 pylint==4.0.7
-pyright==1.1.411
+pyright==1.1.414

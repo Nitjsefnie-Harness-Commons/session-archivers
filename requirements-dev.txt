@@ -1,6 +1,6 @@
 # Lint / type toolchain, mirroring the house set. Versions pinned so a tool
 # release cannot turn CI red on an unchanged commit. The suites are stdlib
 # only; boto3 is the one runtime dep, declared in pyproject.toml.
-pycodestyle==2.14.0
+pycodestyle==2.15.0
 pylint==4.1.3
 pyright==1.1.411

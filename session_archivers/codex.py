@@ -287,7 +287,8 @@ def prune_thread_history(log, dry_run=False):
                     counts[table] = conn.execute('DELETE ' + rows).rowcount
             conn.execute('ROLLBACK' if dry_run else 'COMMIT')
             if not dry_run:
-                conn.execute('PRAGMA incremental_vacuum').fetchall()
+                # executescript steps it to the end; before 3.12, execute frees one page.
+                conn.executescript('PRAGMA incremental_vacuum;')
                 conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchall()
     except sqlite3.Error as e:
         log(f'thread history: not pruned this run: {e}')

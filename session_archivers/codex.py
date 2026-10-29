@@ -11,8 +11,11 @@ Designed to run hourly via cron. Behaviour per run:
    session_meta head, derive its key, upload (size-skip, idempotent).
 3. Publish one sessions/<hash>/project.json marker per project so the
    dashboard can show a path instead of a hash.
-4. Delete a local rollout once it is uploaded AND older than DAYS.
+4. Delete a local rollout once it is uploaded AND older than DAYS, unless
+   a live Codex writer still holds its thread-writer lock.
 5. Log a one-liner summary to ~/.codex/archive-codex-sessions.log.
+6. Prune ~/.codex/thread_history_1.sqlite: drop the rows of every thread
+   whose rollout is no longer on disk (see prune_thread_history).
 
 WHY THE KEY LAYOUT IS THE KIMI ONE, NOT A CODEX-SHAPED ONE
 ----------------------------------------------------------
@@ -47,13 +50,17 @@ Flags:
 Exit code: 0 on success, 1 if any upload failed.
 '''
 
-__version__ = '2.0.0'
+__version__ = '2.1.0'
 # Cross-platform: must work on Linux AND Windows. No POSIX-only calls without
 # a Windows fallback. Bump __version__ (SemVer) on every substantive change.
 
 import argparse
+import contextlib
 import hashlib
 import json
+import os
+import sqlite3
+import sys
 import time
 from collections import Counter
 from pathlib import Path
@@ -67,6 +74,15 @@ CODEX_DIR = Path.home() / '.codex'
 SESSIONS_DIR = CODEX_DIR / 'sessions'
 LOCK_FILE = CODEX_DIR / 'archive-codex-sessions.lock'
 LOG_FILE = CODEX_DIR / 'archive-codex-sessions.log'
+ARCHIVED_SESSIONS_DIR = CODEX_DIR / 'archived_sessions'
+WRITER_LOCKS_DIR = CODEX_DIR / 'thread-writer-locks'
+THREAD_HISTORY_DB = CODEX_DIR / 'thread_history_1.sqlite'
+DB_TIMEOUT = 30
+"""Seconds to wait for a Codex writer to release the thread-history DB."""
+
+# Codex's own per-thread delete, in its order.
+THREAD_HISTORY_TABLES = ('thread_items', 'thread_realtime_items',
+                         'thread_turns', 'thread_history_projection_state')
 
 DAYS = runtime.DAYS
 
@@ -86,12 +102,14 @@ def project_hash(cwd):
 def rollout_uuid(path):
     '''The uuid embedded in rollout-<timestamp>-<uuid>.jsonl.
 
-    Used only to key SUBAGENT rollouts, whose thread id is their parent's
-    and therefore not unique per file.
+    It is the rollout's own thread id. The R2 key uses it only for SUBAGENT
+    rollouts, whose session_id is their parent's and therefore not unique
+    per file; the writer-lock probe and the thread-history prune use it for
+    every rollout. Accepts .jsonl and .jsonl.zst names.
     '''
     stem = Path(path).name
-    if stem.endswith('.jsonl'):
-        stem = stem[:-len('.jsonl')]
+    for suffix in ('.zst', '.jsonl'):  # Codex compresses old rollouts to .jsonl.zst
+        stem = stem.removesuffix(suffix)
     parts = stem.split('-')
     # rollout-YYYY-MM-DDTHH-MM-SS-<5 uuid groups>
     return '-'.join(parts[-5:]) if len(parts) >= 5 else stem
@@ -152,6 +170,133 @@ def find_rollouts():
     return sorted(SESSIONS_DIR.glob('**/rollout-*.jsonl'))
 
 
+def writer_lock_held(thread_id):
+    '''True when a live Codex writer holds thread-writer-locks/<id>.lock.
+
+    Codex holds an exclusive flock there while it writes the thread, so a
+    non-blocking shared flock fails exactly then; it is released at once. No
+    lock file means no writer. A lock file that cannot be opened or probed
+    counts as held: keeping a thread is the safe error.
+
+    Always False on Windows, where Codex locks with LockFileEx and nothing is
+    probed here.
+    '''
+    if sys.platform == 'win32':
+        return False
+    import fcntl  # pylint: disable=import-outside-toplevel
+    try:
+        fh = open(WRITER_LOCKS_DIR / f'{thread_id}.lock', 'rb')  # pylint: disable=consider-using-with
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    with fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return False
+
+
+def _raise(error):
+    raise error
+
+
+def _threads_on_disk():
+    '''Thread ids that still have a rollout file or a live writer.
+
+    Raises OSError when any part of the sessions tree, an existing
+    archived_sessions tree or an existing writer-locks directory cannot be
+    listed: a rollout hidden that way would look gone, and its thread's rows
+    would be pruned. A missing sessions directory raises too. An empty one
+    does not: no rollout on disk means no thread Codex can read.
+    '''
+    roots = [SESSIONS_DIR]
+    if os.path.lexists(ARCHIVED_SESSIONS_DIR):
+        roots.append(ARCHIVED_SESSIONS_DIR)  # Codex creates it on first archive
+    keep = set()
+    for root in roots:
+        for _, _, files in os.walk(root, onerror=_raise):
+            keep.update(rollout_uuid(f) for f in files
+                        if f.startswith('rollout-')
+                        and f.endswith(('.jsonl', '.jsonl.zst')))
+    if os.path.lexists(WRITER_LOCKS_DIR):
+        for name in os.listdir(WRITER_LOCKS_DIR):
+            thread_id = name.removesuffix('.lock')
+            if name.endswith('.lock') and writer_lock_held(thread_id):
+                keep.add(thread_id)
+    return keep
+
+
+def prune_thread_history(log, dry_run=False):
+    '''Drop the thread-history rows of every thread whose rollout is gone.
+
+    thread_history_1.sqlite is Codex's rebuildable projection of the rollout
+    files, and Codex cannot read a thread's rows once its rollout is gone
+    ("missing source rollout"); nothing else ever deletes them, so without
+    this the DB grows for as long as the archiver retires rollouts.
+
+    Kept: every thread with a rollout under sessions/ or archived_sessions/,
+    and every thread whose writer lock is held. The keep set is read after
+    BEGIN IMMEDIATE takes the write lock, right before the DELETEs: Codex
+    writes a rollout before projecting it, and no projection row can land
+    while the lock is held. Then PRAGMA incremental_vacuum hands the freed
+    pages back to the filesystem (Codex creates the DB auto_vacuum =
+    INCREMENTAL; on any other DB it frees nothing) and the WAL is truncated.
+
+    A Codex writer holding the DB past DB_TIMEOUT, or any other SQLite
+    error, is logged and skips this run. A sessions directory that is
+    missing or cannot be fully listed, or an archived_sessions or
+    writer-locks directory that exists but cannot be listed, refuses the
+    prune. Neither touches the archive run's exit code.
+    A table an older Codex schema lacks is skipped. dry_run counts the rows
+    and deletes nothing.
+    '''
+    db = THREAD_HISTORY_DB
+    if not db.is_file():
+        log(f'thread history: no {db.name}, nothing to prune')
+        return
+    try:
+        with contextlib.closing(sqlite3.connect(
+                db, timeout=DB_TIMEOUT, isolation_level=None)) as conn:
+            # Debian's SQLite builds with SECURE_DELETE: every freed page
+            # would be zero-written through the WAL, 3x slower.
+            conn.execute('PRAGMA secure_delete = off')
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                keep = _threads_on_disk()
+            except OSError as e:
+                log(f'thread history: not pruned, cannot list {e.filename}: {e}')
+                return  # closing rolls the transaction back
+            present = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            conn.execute('CREATE TEMP TABLE keep (id TEXT PRIMARY KEY)')
+            conn.executemany('INSERT INTO temp.keep VALUES (?)',
+                             [(k,) for k in keep])
+            counts = {}
+            for table in THREAD_HISTORY_TABLES:
+                if table not in present:
+                    continue
+                rows = (f'FROM {table} WHERE thread_id NOT IN'
+                        ' (SELECT id FROM temp.keep)')
+                if dry_run:
+                    counts[table] = conn.execute(
+                        'SELECT count(*) ' + rows).fetchone()[0]
+                else:
+                    counts[table] = conn.execute('DELETE ' + rows).rowcount
+            conn.execute('ROLLBACK' if dry_run else 'COMMIT')
+            if not dry_run:
+                conn.execute('PRAGMA incremental_vacuum').fetchall()
+                conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchall()
+    except sqlite3.Error as e:
+        log(f'thread history: not pruned this run: {e}')
+        return
+    tally = ' '.join(f'{t}={n}' for t, n in counts.items())
+    log(f'thread history: {"DRY prune" if dry_run else "pruned"} {tally}'
+        f' (kept {len(keep)} threads)')
+
+
 def _upload_markers(dest, projects):
     '''One sessions/<hash>/project.json per project seen this run.
 
@@ -180,6 +325,9 @@ def _retire_local(path, key, dest, cutoff):
     if not runtime.is_old(path, cutoff):
         return False
     if not dest.holds(key):
+        return False
+    if writer_lock_held(rollout_uuid(path)):
+        dest.log(f'  kept, a live writer still holds it: {path}')
         return False
     if dest.dry_run:
         dest.log(f'  DRY rm {path}')
@@ -249,6 +397,7 @@ def main():
             dest.save_manifest()
         log(f'done: uploaded={uploaded} deleted={deleted} '
             f'failed={failed} skipped={skipped}')
+        prune_thread_history(log, args.dry_run)
         return 1 if failed else 0
     finally:
         lock.close()

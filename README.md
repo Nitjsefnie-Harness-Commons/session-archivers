@@ -55,6 +55,17 @@ archive-codex-sessions  [--days N] [--dry-run]
 `--days` sets the retention threshold for the delete gate; upload is
 independent of it, so a file is always uploaded before it can be removed.
 
+The Codex archiver keeps a rollout whose thread-writer lock a live Codex
+process still holds, however old it is. After the rollout pass it also prunes
+`~/.codex/thread_history_1.sqlite`, Codex's rebuildable projection of the
+rollouts. Codex cannot read a thread's rows there once the rollout is gone,
+and nothing else deletes them. The prune keeps every thread that has a rollout
+under `sessions/` or `archived_sessions/`, plus every thread whose writer lock
+is held (lock probing is POSIX-only; on Windows the rollout alone decides). It
+refuses to run when `sessions/` is missing or cannot be listed, and skips the
+run when a Codex writer holds the database for more than 30 seconds. Neither
+case changes the exit code.
+
 ## Configuration
 
 No credential is ever written into the source — this repository is public, and

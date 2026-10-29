@@ -20,6 +20,7 @@ import contextlib
 import hashlib
 import json
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -151,6 +152,11 @@ def _run_main(mod, tmp, argv, client, zai_client=None, llama_client=None,
     attrs.setdefault("LOCK_FILE", Path(tmp) / "run.lock")
     if mod is _CLAUDE:
         attrs.setdefault("PROVIDER_CACHE", Path(tmp) / "providers.json")
+    if mod is _CODEX:
+        # main() prunes the thread-history DB; never the real one.
+        attrs.setdefault("ARCHIVED_SESSIONS_DIR", Path(tmp) / "archived_sessions")
+        attrs.setdefault("WRITER_LOCKS_DIR", Path(tmp) / "thread-writer-locks")
+        attrs.setdefault("THREAD_HISTORY_DB", Path(tmp) / "thread_history_1.sqlite")
     try:
         sys.argv = argv
         if zai_client is not None:
@@ -1184,6 +1190,333 @@ def test_codex_main_exits_quietly_when_another_run_holds_the_lock(tmp):
         holder.close()
     assert code == 0
     assert client.puts == []
+
+
+# --- codex: thread-history prune -------------------------------------------------------
+
+# The four per-thread tables, column shape and the realtime cleanup trigger as
+# Codex's own migrations create them.
+_THREAD_HISTORY_SCHEMA = {
+    "thread_turns": """CREATE TABLE thread_turns (
+        thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+        rollout_ordinal INTEGER NOT NULL, status TEXT NOT NULL,
+        error_json TEXT, started_at INTEGER, completed_at INTEGER,
+        duration_ms INTEGER, first_user_item_id TEXT,
+        final_agent_item_id TEXT, rollout_byte_offset INTEGER,
+        rollout_end_ordinal INTEGER, rollout_end_byte_offset INTEGER,
+        PRIMARY KEY (thread_id, turn_id))""",
+    "thread_items": """CREATE TABLE thread_items (
+        thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+        item_id TEXT NOT NULL, rollout_ordinal INTEGER NOT NULL,
+        created_at_ms INTEGER NOT NULL, item_json TEXT NOT NULL,
+        item_type TEXT NOT NULL DEFAULT '',
+        updated_at_ordinal INTEGER NOT NULL DEFAULT 0,
+        started_at_ms INTEGER, completed_at_ms INTEGER,
+        PRIMARY KEY (thread_id, turn_id, item_id))""",
+    "thread_history_projection_state": """CREATE TABLE thread_history_projection_state (
+        thread_id TEXT PRIMARY KEY,
+        next_rollout_byte_offset INTEGER NOT NULL,
+        next_rollout_ordinal INTEGER NOT NULL)""",
+    "thread_realtime_items": """CREATE TABLE thread_realtime_items (
+        thread_id TEXT NOT NULL, item_id TEXT NOT NULL,
+        rollout_ordinal INTEGER NOT NULL, created_at_ms INTEGER NOT NULL,
+        item_type TEXT NOT NULL, item_json TEXT NOT NULL,
+        PRIMARY KEY (thread_id, item_id))""",
+}
+_REALTIME_TRIGGER = """CREATE TRIGGER thread_realtime_items_projection_cleanup
+    AFTER DELETE ON thread_history_projection_state
+BEGIN
+    DELETE FROM thread_realtime_items WHERE thread_id = OLD.thread_id;
+END"""
+_TABLES = ("thread_items", "thread_realtime_items", "thread_turns",
+           "thread_history_projection_state")
+
+
+def _thread_id(n):
+    return f"0199{n:04x}-aaaa-7bbb-8ccc-{n:012x}"
+
+
+def _history_db(path, threads, tables=_TABLES, item_bytes=64):
+    """A WAL, incremental-auto-vacuum DB holding one row per table per thread."""
+    with contextlib.closing(sqlite3.connect(path, isolation_level=None)) as c:
+        c.execute("PRAGMA auto_vacuum = INCREMENTAL")
+        c.execute("PRAGMA journal_mode = WAL")
+        for table in tables:
+            c.execute(_THREAD_HISTORY_SCHEMA[table])
+        if "thread_realtime_items" in tables and \
+                "thread_history_projection_state" in tables:
+            c.execute(_REALTIME_TRIGGER)
+        body = "x" * item_bytes
+        for t in threads:
+            if "thread_items" in tables:
+                c.execute("INSERT INTO thread_items (thread_id, turn_id, item_id,"
+                          " rollout_ordinal, created_at_ms, item_json)"
+                          " VALUES (?, 'turn', 'item', 1, 0, ?)", (t, body))
+            if "thread_realtime_items" in tables:
+                c.execute("INSERT INTO thread_realtime_items VALUES"
+                          " (?, 'rt', 1, 0, 'realtime_session_started', '{}')", (t,))
+            if "thread_turns" in tables:
+                c.execute("INSERT INTO thread_turns (thread_id, turn_id,"
+                          " rollout_ordinal, status) VALUES (?, 'turn', 1, 'done')",
+                          (t,))
+            if "thread_history_projection_state" in tables:
+                c.execute("INSERT INTO thread_history_projection_state VALUES"
+                          " (?, 10, 1)", (t,))
+    return path
+
+
+def _threads_in(path, table):
+    with contextlib.closing(sqlite3.connect(path)) as c:
+        return sorted(r[0] for r in c.execute(f"SELECT thread_id FROM {table}"))
+
+
+def _codex_home(tmp):
+    """Every path the prune reads, under one temp CODEX_HOME."""
+    home = Path(tmp) / "codex"
+    return {"SESSIONS_DIR": home / "sessions",
+            "ARCHIVED_SESSIONS_DIR": home / "archived_sessions",
+            "WRITER_LOCKS_DIR": home / "thread-writer-locks",
+            "THREAD_HISTORY_DB": home / "thread_history_1.sqlite"}
+
+
+def _home_with_db(tmp, threads, **db_kwargs):
+    dirs = _codex_home(tmp)
+    dirs["SESSIONS_DIR"].mkdir(parents=True)
+    _history_db(dirs["THREAD_HISTORY_DB"], threads, **db_kwargs)
+    return dirs
+
+
+def _rollout_file(root, thread_id, suffix=".jsonl"):
+    return _write(root / "2026" / "08" / "21"
+                  / f"rollout-2026-08-21T10-00-00-{thread_id}{suffix}", "{}\n")
+
+
+def _prune(dirs, dry_run=False, **extra):
+    said = []
+    with sandbox(_CODEX, **dirs, **extra):
+        _CODEX.prune_thread_history(said.append, dry_run=dry_run)
+    return said
+
+
+@contextlib.contextmanager
+def _held_writer_lock(locks_dir, thread_id):
+    """Hold <id>.lock the way a live Codex writer does: an exclusive flock."""
+    if sys.platform == "win32":
+        _util.skip("Codex's writer lock is not probed on Windows")
+    import fcntl  # pylint: disable=import-outside-toplevel
+    locks_dir.mkdir(parents=True, exist_ok=True)
+    with open(locks_dir / f"{thread_id}.lock", "wb") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def test_codex_prune_drops_every_table_row_of_a_thread_whose_rollout_is_gone(tmp):
+    kept_live, kept_zst, kept_archived, gone = (_thread_id(n) for n in range(4))
+    dirs = _home_with_db(tmp, [kept_live, kept_zst, kept_archived, gone])
+    _rollout_file(dirs["SESSIONS_DIR"], kept_live)
+    _rollout_file(dirs["SESSIONS_DIR"], kept_zst, ".jsonl.zst")
+    _rollout_file(dirs["ARCHIVED_SESSIONS_DIR"], kept_archived)
+    said = _prune(dirs)
+    for table in _TABLES:
+        assert _threads_in(dirs["THREAD_HISTORY_DB"], table) == sorted(
+            [kept_live, kept_zst, kept_archived]), table
+    assert any("thread history: pruned" in line and "thread_items=1" in line
+               and "thread_history_projection_state=1" in line
+               for line in said), said
+
+
+def test_codex_prune_reclaims_the_freed_pages_and_truncates_the_wal(tmp):
+    dirs = _home_with_db(tmp, [_thread_id(n) for n in range(40)],
+                         item_bytes=20000)
+    db = dirs["THREAD_HISTORY_DB"]
+    # An idle second connection, as a Codex process would hold: without it
+    # the prune's own close would checkpoint and delete the WAL anyway.
+    with contextlib.closing(sqlite3.connect(db)) as idle:
+        idle.execute("SELECT count(*) FROM thread_items").fetchall()
+        _prune(dirs)
+        assert _threads_in(db, "thread_items") == []
+        wal = Path(str(db) + "-wal")
+        assert wal.stat().st_size == 0, wal.stat().st_size
+        assert idle.execute("PRAGMA freelist_count").fetchone()[0] == 0
+
+
+def test_codex_prune_keeps_a_live_thread_with_no_rollout_yet(tmp):
+    live, finished = _thread_id(1), _thread_id(2)
+    dirs = _home_with_db(tmp, [live, finished])
+    # A lock file alone is not liveness: Codex leaves unlocked ones behind.
+    dirs["WRITER_LOCKS_DIR"].mkdir(parents=True)
+    (dirs["WRITER_LOCKS_DIR"] / f"{finished}.lock").write_bytes(b"")
+    with _held_writer_lock(dirs["WRITER_LOCKS_DIR"], live):
+        _prune(dirs)
+    assert _threads_in(dirs["THREAD_HISTORY_DB"], "thread_items") == [live]
+
+
+def test_codex_prune_prunes_every_thread_when_the_sessions_dir_is_empty(tmp):
+    """Empty is not absent: no rollout on disk means no thread is readable."""
+    dirs = _home_with_db(tmp, [_thread_id(1)])
+    _prune(dirs)
+    assert _threads_in(dirs["THREAD_HISTORY_DB"], "thread_items") == []
+
+
+def test_codex_prune_refuses_when_the_sessions_dir_is_missing(tmp):
+    dirs = _home_with_db(tmp, [_thread_id(1)])
+    dirs["SESSIONS_DIR"].rmdir()
+    said = _prune(dirs)
+    assert _threads_in(dirs["THREAD_HISTORY_DB"], "thread_items") == [_thread_id(1)]
+    assert any("thread history: not pruned" in line for line in said), said
+
+
+def test_codex_prune_refuses_when_a_rollout_root_cannot_be_listed(tmp):
+    """A root that is not a directory hides its rollouts; so does the locks dir."""
+    for name in ("SESSIONS_DIR", "ARCHIVED_SESSIONS_DIR", "WRITER_LOCKS_DIR"):
+        sub = Path(tmp) / name
+        sub.mkdir()
+        dirs = _home_with_db(sub, [_thread_id(1)])
+        if dirs[name].exists():
+            dirs[name].rmdir()
+        _write(dirs[name], "not a directory")
+        said = _prune(dirs)
+        assert _threads_in(dirs["THREAD_HISTORY_DB"], "thread_items") == [
+            _thread_id(1)], name
+        assert any("thread history: not pruned" in line for line in said), (name, said)
+
+
+def test_codex_prune_refuses_when_a_sessions_subdir_cannot_be_listed(tmp):
+    dirs = _home_with_db(tmp, [_thread_id(1)])
+    hidden = dirs["SESSIONS_DIR"] / "2026"
+    hidden.mkdir()
+    os.chmod(hidden, 0)
+    try:
+        if os.access(hidden, os.R_OK):
+            _util.skip("this user can list a mode-000 directory (root, or Windows)")
+        said = _prune(dirs)
+    finally:
+        os.chmod(hidden, 0o755)
+    assert _threads_in(dirs["THREAD_HISTORY_DB"], "thread_items") == [_thread_id(1)]
+    assert any("thread history: not pruned" in line for line in said), said
+
+
+def test_codex_prune_without_an_archived_sessions_dir_still_prunes(tmp):
+    """Codex creates archived_sessions on first archive; absent means none."""
+    kept, gone = _thread_id(1), _thread_id(2)
+    dirs = _home_with_db(tmp, [kept, gone])
+    _rollout_file(dirs["SESSIONS_DIR"], kept)
+    assert not dirs["ARCHIVED_SESSIONS_DIR"].exists()
+    _prune(dirs)
+    assert _threads_in(dirs["THREAD_HISTORY_DB"], "thread_items") == [kept]
+
+
+def test_codex_prune_skips_without_error_while_a_writer_holds_the_db(tmp):
+    dirs = _home_with_db(tmp, [_thread_id(1)])
+    with contextlib.closing(sqlite3.connect(dirs["THREAD_HISTORY_DB"],
+                                            isolation_level=None)) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        said = _prune(dirs, DB_TIMEOUT=0.1)
+        writer.execute("ROLLBACK")
+    assert _threads_in(dirs["THREAD_HISTORY_DB"], "thread_items") == [_thread_id(1)]
+    assert any("thread history: not pruned" in line and "locked" in line
+               for line in said), said
+
+
+def test_codex_prune_skips_a_table_an_older_schema_lacks(tmp):
+    tables = tuple(t for t in _TABLES if t != "thread_realtime_items")
+    kept, gone = _thread_id(1), _thread_id(2)
+    dirs = _home_with_db(tmp, [kept, gone], tables=tables)
+    _rollout_file(dirs["SESSIONS_DIR"], kept)
+    said = _prune(dirs)
+    for table in tables:
+        assert _threads_in(dirs["THREAD_HISTORY_DB"], table) == [kept], table
+    assert any("thread history: pruned" in line for line in said), said
+
+
+def test_codex_prune_without_a_db_logs_and_creates_none(tmp):
+    dirs = _codex_home(tmp)
+    dirs["SESSIONS_DIR"].mkdir(parents=True)
+    said = _prune(dirs)
+    assert not dirs["THREAD_HISTORY_DB"].exists()
+    assert any("thread history: no thread_history_1.sqlite" in line
+               for line in said), said
+
+
+def test_codex_prune_dry_run_counts_and_deletes_nothing(tmp):
+    dirs = _home_with_db(tmp, [_thread_id(1), _thread_id(2)])
+    said = _prune(dirs, dry_run=True)
+    assert _threads_in(dirs["THREAD_HISTORY_DB"], "thread_items") == [
+        _thread_id(1), _thread_id(2)]
+    assert any("thread history: DRY prune" in line and "thread_items=2" in line
+               for line in said), said
+
+
+def test_codex_writer_lock_probe_reads_absent_unopenable_and_windows(tmp):
+    locks = Path(tmp) / "locks"
+    with sandbox(_CODEX, WRITER_LOCKS_DIR=locks):
+        assert not _CODEX.writer_lock_held(_thread_id(1))  # no lock file
+        if sys.platform == "win32":
+            _util.skip("the flock arms below are POSIX-only")
+        (locks / f"{_thread_id(2)}.lock").mkdir(parents=True)
+        # Cannot be opened: keeping the thread is the safe error.
+        assert _CODEX.writer_lock_held(_thread_id(2))
+        (locks / f"{_thread_id(3)}.lock").write_bytes(b"")
+        assert not _CODEX.writer_lock_held(_thread_id(3))  # present, free
+        with _held_writer_lock(locks, _thread_id(4)):
+            assert _CODEX.writer_lock_held(_thread_id(4))
+            saved = sys.platform
+            sys.platform = "win32"
+            try:
+                # Codex locks with LockFileEx there; nothing is probed, so
+                # even a held lock reads free.
+                assert not _CODEX.writer_lock_held(_thread_id(4))
+            finally:
+                sys.platform = saved
+
+
+def test_codex_keeps_a_stale_rollout_a_live_writer_still_holds(tmp):
+    """A thread idle past the retention gate is still being written."""
+    thread = _thread_id(1)
+    locks = Path(tmp) / "locks"
+    path = _write(Path(tmp) / f"rollout-2026-08-21T10-00-00-{thread}.jsonl",
+                  "{}\n", days_old=10)
+    dest, _, said = _dest()
+    dest.remote = {"sessions/h/t/wire.jsonl.xz": 40}
+    with sandbox(_CODEX, WRITER_LOCKS_DIR=locks), \
+            _held_writer_lock(locks, thread):
+        assert not _CODEX._retire_local(path, "sessions/h/t/wire.jsonl", dest,
+                                        _cutoff())
+    assert path.exists()
+    assert any("live writer" in line for line in said), said
+
+
+def test_codex_main_prunes_thread_history_after_the_rollout_pass(tmp):
+    sessions = Path(tmp) / "sessions"
+    kept = _thread_id(1)
+    _rollout(sessions, "21", kept, {"session_id": kept, "cwd": "/proj"})
+    db = _history_db(Path(tmp) / "thread_history_1.sqlite", [kept, _thread_id(2)])
+    client = _util.FakeS3(_BUCKET)
+    code, out = _run_main(_CODEX, tmp, ["archive-codex-sessions"], client,
+                          SESSIONS_DIR=sessions, THREAD_HISTORY_DB=db)
+    assert code == 0
+    assert _threads_in(db, "thread_items") == [kept]
+    assert "thread history: pruned" in out
+
+
+def test_codex_main_uploads_and_succeeds_while_the_db_is_locked(tmp):
+    sessions = Path(tmp) / "sessions"
+    _rollout(sessions, "21", _thread_id(1), {"session_id": "t", "cwd": "/proj"})
+    db = _history_db(Path(tmp) / "thread_history_1.sqlite", [_thread_id(2)])
+    client = _util.FakeS3(_BUCKET)
+    with contextlib.closing(sqlite3.connect(db, isolation_level=None)) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        code, out = _run_main(_CODEX, tmp, ["archive-codex-sessions"], client,
+                              SESSIONS_DIR=sessions, THREAD_HISTORY_DB=db,
+                              DB_TIMEOUT=0.1)
+        writer.execute("ROLLBACK")
+    assert code == 0
+    assert f"sessions/{_CODEX.project_hash('/proj')}/t/wire.jsonl.xz" in client.objects
+    assert "thread history: not pruned" in out
+    assert _threads_in(db, "thread_items") == [_thread_id(2)]
 
 
 # --- kimi ------------------------------------------------------------------------------

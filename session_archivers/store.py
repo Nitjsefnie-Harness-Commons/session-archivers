@@ -166,6 +166,8 @@ class Store:
         self.dry_run = dry_run
         self.remote = {}
         self.manifest = {}
+        # Keys a dry run reported it would upload; never filled in a real run.
+        self._planned = set()
 
     # --- inventory and manifest ---------------------------------------------
 
@@ -208,13 +210,15 @@ class Store:
         failed upload must never take the only copy with it, and an object
         of the same size may still hold older bytes. So a stored form counts
         only while the manifest records this file's current signature for
-        it. A file that vanished proves nothing and reads False.
+        it. A file that vanished proves nothing and reads False. In a dry
+        run, a key this run reported it would upload counts too, so the
+        preview shows the deletions a real run would make.
         '''
         try:
             st = local_path.stat()
         except OSError:
             return False
-        return self._held(key, _signature(st))
+        return key in self._planned or self._held(key, _signature(st))
 
     def holds_dir(self, local_dir, prefix):
         '''`holds` for every file `upload_dir(local_dir, prefix)` uploads.'''
@@ -249,7 +253,7 @@ class Store:
         if key.endswith('.xz'):
             return self._upload_verbatim(local_path, key, st, sig)
         if self.dry_run:
-            self.log(f'  DRY upload {key} ({st.st_size:,} B)')
+            self._preview(key, st.st_size)
             return True
 
         xz_key = key + '.xz'
@@ -260,6 +264,20 @@ class Store:
         else:
             self._store_plain(key, xz_key, data, sig)
         return True
+
+    def _preview(self, key, size):
+        '''The dry-run line for a key `upload_file` would compress or not.
+
+        Only text is always xz; for anything else the form is decided by
+        compressing it, which a preview does not do.
+        '''
+        self._planned.add(key)
+        if is_text(key):
+            self.log(f'  DRY upload {key}.xz ({size:,} B uncompressed; '
+                     'compressed size not computed)')
+        else:
+            self.log(f'  DRY upload {key} or {key}.xz ({size:,} B '
+                     'uncompressed; stored form undetermined until upload)')
 
     def upload_bytes(self, body, key):
         '''In-memory variant — for markers and other generated objects.'''
@@ -296,6 +314,7 @@ class Store:
         '''
         if self.dry_run:
             self.log(f'  DRY upload {key} ({st.st_size:,} B)')
+            self._planned.add(key)
             return True
         body = local_path.read_bytes()
         self.client.put_object(Bucket=self.bucket, Key=key, Body=body)

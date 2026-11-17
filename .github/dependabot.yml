@@ -1,5 +1,5 @@
-# Every dependency in this repo is pinned to an exact version, deliberately:
-# a tool or library release must never turn CI red on an unchanged commit.
+# Every tool a requirements file names is pinned to an exact version:
+# a tool release must never turn CI red on an unchanged commit.
 # The cost of that choice is that pins go stale silently, and a stale pin is
 # how a fixed CVE stays exploitable. Dependabot pays that cost back — it is
 # the counterpart to audit.yml, which detects the problem but cannot fix it.

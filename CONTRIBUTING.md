@@ -46,7 +46,8 @@ for s in tests/test_*.py; do
   python -m coverage run --parallel-mode --source=session_archivers "$s"
 done
 python -m coverage combine
-python -m coverage report --fail-under=94 --precision=1
+python -m coverage report --precision=1 --fail-under="$(
+  python .github/scripts/ratchet_thresholds.py floor .github/ci-thresholds.json)"
 
 # tests, wheel job
 pip install --require-hashes -r requirements-build.txt
@@ -116,9 +117,18 @@ python3 .github/scripts/commit_scopes.py
   it, so a finding it suppresses still fails both. No fixture or example may carry a credential-shaped value; use
   the reserved documentation values (`example.com`, `192.0.2.0/24`) for hosts
   and addresses.
-- The coverage floor is a ratchet, not a target: raise it by hand in
-  `tests.yml` as coverage climbs, and write tests rather than lower it to fit a
-  result.
+- The coverage floor is a ratchet, not a target, recorded in
+  `.github/ci-thresholds.json` with the total it was set from. On a push to
+  `main` that measures more than 1.5 points above that total, the coverage job
+  stages a raised record (floor 1.5 under the new total, never lower than
+  before) and the `ratchet push` workflow commits it to `main` with a deploy
+  key. If `main` moved past the measured commit, a change to any other path
+  makes the measurement stale and drops the raise; a change to that file alone
+  is merged three-way, so a hand raise in between survives, and a conflict
+  drops the raise. A push rejected while `main` stood still fails the run; one
+  rejected after `main` moved drops the raise. A dropped raise returns with
+  the next push that measures above the record. A hand raise is an edit to
+  that file; write tests rather than lower it to fit a result.
 - Four more workflows check a pull request and need GitHub to run, so they
   have no local command: `pr gate` (the description against
   `.github/PULL_REQUEST_TEMPLATE.md`, Conventional Commits subjects, issue

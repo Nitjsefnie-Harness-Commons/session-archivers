@@ -12,6 +12,7 @@ import importlib.util
 import os
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 
@@ -67,6 +68,19 @@ def transcripts(limit=None, min_size=0):
              if os.path.getsize(p) >= min_size]
     found.sort(key=os.path.getsize)
     return found[-limit:] if limit else found
+
+
+def write(path, data, days_old=None):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data.encode("utf-8") if isinstance(data, str) else data)
+    if days_old is not None:
+        age(path, days_old)
+    return path
+
+
+def age(path, days):
+    old = time.time() - days * 86400
+    os.utime(path, (old, old))
 
 
 # pylint: disable=too-few-public-methods

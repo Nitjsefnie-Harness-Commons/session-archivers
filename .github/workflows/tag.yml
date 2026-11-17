@@ -125,48 +125,82 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ inputs.sha || github.sha }}
           REPO: ${{ github.repository }}
-        # Three details that are each a way this can be wrong:
-        #   - it excludes ITSELF, or it would wait on a job waiting on it;
-        #   - it requires at least one other check to exist, so it cannot
-        #     race ahead and tag before CI has even been scheduled;
-        #   - `cancelled` counts as failure. A cancelled run means a newer
-        #     push superseded this SHA, which is not a commit to release.
+          SELF: ${{ github.job }}
+        # What it checks, each a way this can be wrong:
+        #   - it skips only runs named exactly as this job, or it would wait
+        #     on a job waiting on it; `tag-...` names still count;
+        #   - each `required` gate must report and conclude `success`, so
+        #     it cannot tag before CI is scheduled, nor on a skipped gate.
+        #     A matrix gate's runs are named `<job> (<legs>)`. actionlint
+        #     is absent: its push trigger covers workflow files only;
+        #   - every other run must end success, skipped or neutral, and it
+        #     waits for every pending run. `cancelled` counts as failure: a
+        #     cancelled run means a newer push superseded this SHA;
+        #   - a required gate still unreported at the deadline is named.
         run: |
+          required=(pycodestyle pylint pyright pip-audit analyze suites wheel coverage)
+          gate_of() {
+            for gate in "${required[@]}"; do
+              case "$1" in "$gate" | "$gate ("*) echo "$gate"; return ;; esac
+            done
+          }
           deadline=$(( SECONDS + 45 * 60 ))
           while [ "$SECONDS" -lt "$deadline" ]; do
             runs="$(gh api --paginate \
               -H "Cache-Control: no-cache" \
               "repos/$REPO/commits/$SHA/check-runs" \
-              --jq '.check_runs[] | select(.name | startswith("tag") | not)
-                    | "\(.status)\t\(.conclusion)\t\(.name)"')"
+              --jq '.check_runs[] | "\(.status)\t\(.conclusion)\t\(.name)"')"
 
-            if [ -z "$runs" ]; then
-              echo "no other check runs reported yet, waiting..."
-              sleep 20
-              continue
-            fi
+            declare -A seen=()
+            judged="" pending="" bad=""
+            while IFS=$'\t' read -r status conclusion name; do
+              if [ -z "$name" ] || [ "$name" = "$SELF" ]; then continue; fi
+              line="$(printf '%s\t%s\t%s' "$status" "$conclusion" "$name")"
+              judged+="    $line"$'\n'
+              gate="$(gate_of "$name")"
+              if [ -n "$gate" ]; then seen[$gate]=1; fi
+              if [ "$status" != completed ]; then
+                pending+="    $line"$'\n'
+              elif [ -n "$gate" ] && [ "$conclusion" != success ]; then
+                bad+="    $line"$'\n'
+              elif [ -z "$gate" ]; then
+                case "$conclusion" in
+                  success | skipped | neutral) ;;
+                  *) bad+="    $line"$'\n' ;;
+                esac
+              fi
+            done <<< "$runs"
+            missing=""
+            for gate in "${required[@]}"; do
+              if [ -z "${seen[$gate]:-}" ]; then missing+=" $gate"; fi
+            done
 
-            pending="$(echo "$runs" | grep -cv '^completed' || true)"
-            if [ "$pending" -gt 0 ]; then
-              echo "$pending check(s) still running:"
-              echo "$runs" | grep -v '^completed' | awk '{print "    " $0}'
+            if [ -n "$missing" ] || [ -n "$pending" ]; then
+              if [ -n "$missing" ]; then
+                echo "required gate(s) not reported yet:$missing"
+              fi
+              if [ -n "$pending" ]; then
+                echo "check(s) still running:"
+                printf '%s' "$pending"
+              fi
               sleep 20
               continue
             fi
 
             echo "All checks completed:"
-            echo "$runs" | awk '{print "    " $0}'
-            bad="$(echo "$runs" \
-              | awk -F'\t' '$2 != "success" && $2 != "skipped" && $2 != "neutral"')"
+            printf '%s' "$judged"
             if [ -n "$bad" ]; then
               echo "Refusing to tag: these checks did not pass:" >&2
-              echo "$bad" | awk '{print "    " $0}' >&2
+              printf '%s' "$bad" >&2
               exit 1
             fi
             echo "Every check passed — proceeding."
             exit 0
           done
           echo "Timed out after 45 minutes waiting for checks on $SHA" >&2
+          if [ -n "$missing" ]; then
+            echo "These required gates never reported:$missing" >&2
+          fi
           exit 1
 
       - name: Create and push the tag

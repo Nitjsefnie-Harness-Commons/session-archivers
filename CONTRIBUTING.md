@@ -81,7 +81,14 @@ python3 .github/scripts/commit_scopes.py
   holds a commit the head lacks that touches `.github/`, `requirements*.txt`,
   `pyproject.toml`, `setup.cfg`, `.pylintrc`, `pyrightconfig.json` or
   `run_tests.py` (rebase onto `main`), or when a commit pairs a workflow-name
-  scope with a type other than `ci`. A called leg reports as `<leg> / <job>`,
+  scope with a type other than `ci`. The legs already run on the merge with
+  the `main` of the moment the event fired; the freshness refusal adds that a
+  pull request, which lands by rebase, carries `main`'s gate definitions in
+  its own commits, and a re-run after `main` gained such a commit fetches it
+  and goes red. It cannot see `main` move after the last green run: that
+  takes the ruleset requiring branches to be up to date, or something that
+  re-runs open pull requests' checks on every push to `main`, neither of which
+  this repository's files set up. A called leg reports as `<leg> / <job>`,
   such as `lint / pylint`, so `tests`, `lint`, `types` and `codeql` keep a standalone
   pull-request run for the bare names the ruleset requires until it requires
   `aggregate`; on their own, `audit` runs only on its daily schedule or by

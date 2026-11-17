@@ -134,6 +134,7 @@ jobs:
           fi
 
       - name: Require the head to carry main's gate-defining commits
+        # Sees main as of this run; CONTRIBUTING says what it cannot.
         if: github.event_name == 'pull_request'
         env:
           SESSION_ARCHIVERS_HEAD_SHA: ${{ github.event.pull_request.head.sha }}

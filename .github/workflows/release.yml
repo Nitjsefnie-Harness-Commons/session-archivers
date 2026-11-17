@@ -7,12 +7,18 @@ name: release
 #
 # Two jobs, so that nothing holding a write token runs this repository's code
 # or installs a package: `build` does all of that read-only and hands over an
-# artifact; `publish` only checks and uploads those bytes.
+# artifact; `publish` only checks, attests and uploads those bytes.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      replace:
+        description: 'Replace the assets of a release that already has them'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -83,6 +89,10 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      # Both for the provenance attestation: a Sigstore certificate is
+      # issued against the job's OIDC token.
+      id-token: write
+      attestations: write
 
     steps:
       - name: Refuse a ref that is not a tag
@@ -107,23 +117,53 @@ jobs:
         working-directory: dist
         run: sha256sum -c SHA256SUMS
 
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.whl
+
       - name: Attach the wheel and its checksums to the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.tag.outputs.tag }}
+          REPLACE: ${{ inputs.replace }}
         # `gh`, not a third-party action: it is preinstalled and maintained
         # by GitHub, and this job holds contents: write.
         #
-        # Both branches exist because the two triggers differ: a tag push
-        # creates the release, while a workflow_dispatch rerun finds it
-        # already there and must replace the assets rather than fail.
+        # A release with assets is refused unless `replace` is set: assets
+        # once published are what consumers already verified, and a
+        # published immutable release refuses the upload anyway. `gh release
+        # create` drafts, uploads, then publishes, so an interrupted create
+        # leaves a draft, which is published once its assets are in.
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG exists; replacing its assets."
-            gh release upload "$TAG" dist/*.whl dist/SHA256SUMS --clobber
-          else
+          error="$RUNNER_TEMP/release-view.err"
+          if ! found="$(gh release view "$TAG" \
+              --json isDraft,assets \
+              --jq '"\(.isDraft) \(.assets | length)"' 2>"$error")"; then
+            if [ "$(cat "$error")" != "release not found" ]; then
+              echo "Could not read release $TAG:" >&2
+              cat "$error" >&2
+              exit 1
+            fi
             gh release create "$TAG" --title "$TAG" --generate-notes \
               dist/*.whl dist/SHA256SUMS
+            echo "Published $TAG."
+            exit 0
+          fi
+
+          read -r draft assets <<< "$found"
+          if [ "$assets" = 0 ]; then
+            gh release upload "$TAG" dist/*.whl dist/SHA256SUMS
+          elif [ "$REPLACE" = true ]; then
+            echo "Release $TAG has $assets asset(s); replacing them, as asked."
+            gh release upload "$TAG" dist/*.whl dist/SHA256SUMS --clobber
+          else
+            echo "Release $TAG already has $assets asset(s); not replacing them." >&2
+            echo "Dispatch release.yml against $TAG with replace: true to" >&2
+            echo "replace them; a published immutable release refuses even that." >&2
+            exit 1
+          fi
+          if [ "$draft" = true ]; then
+            gh release edit "$TAG" --draft=false
           fi
           echo "Published $TAG."

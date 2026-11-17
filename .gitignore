@@ -53,9 +53,12 @@
 !/.github/PULL_REQUEST_TEMPLATE.md
 !/.github/comment-share.json
 !/.github/dependabot.yml
+!/.github/scripts/
+!/.github/scripts/aggregate_gate.py
 !/.github/size-baseline.json
 !/.github/workflows/actionlint.yml
 !/.github/workflows/audit.yml
+!/.github/workflows/ci-gate.yml
 !/.github/workflows/claim.yml
 !/.github/workflows/codeql.yml
 !/.github/workflows/comment-share.yml

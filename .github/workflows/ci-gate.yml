@@ -1,0 +1,137 @@
+name: ci gate
+
+# One check, `aggregate`, reports on every trigger and folds the six gate
+# workflows run below as legs. A docs-only change skips the legs; any other
+# change, or one whose path list cannot be read, runs them all.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer head supersedes its pull request's run; no push cancels another.
+  group: ci-gate-${{ github.event.pull_request.number || (github.event_name == 'push' && github.sha) || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify the changed paths
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        # Docs-only is the old push filter: every path is **/*.md, LICENSE or
+        # .gitignore. --no-renames, so a renamed file lists its old path too.
+        run: |
+          from=""
+          case "$EVENT_NAME" in
+            pull_request) from="$BASE_SHA" ;;
+            push) from="$BEFORE_SHA" ;;
+          esac
+          case "$from" in *[!0-9a-f]*) from="" ;; esac
+          changed="$RUNNER_TEMP/changed-paths"
+          docs_only=false
+          if [ -n "$from" ] && git diff --no-renames --name-only -z "$from" "$HEAD_SHA" > "$changed" && [ -s "$changed" ]; then
+            docs_only=true
+            while IFS= read -r -d '' path; do
+              case "$path" in
+                *.md | LICENSE | .gitignore) ;;
+                *) docs_only=false; echo "not documentation: $path"; break ;;
+              esac
+            done < "$changed"
+          else
+            echo "no change list for $EVENT_NAME from '$from': every leg runs"
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "docs_only=$docs_only"
+
+  tests:
+    needs: classify
+    if: needs.classify.outputs.docs_only != 'true'
+    uses: ./.github/workflows/tests.yml
+    permissions:
+      contents: read
+
+  lint:
+    needs: classify
+    if: needs.classify.outputs.docs_only != 'true'
+    uses: ./.github/workflows/lint.yml
+    permissions:
+      contents: read
+
+  types:
+    needs: classify
+    if: needs.classify.outputs.docs_only != 'true'
+    uses: ./.github/workflows/types.yml
+    permissions:
+      contents: read
+
+  audit:
+    needs: classify
+    if: needs.classify.outputs.docs_only != 'true'
+    uses: ./.github/workflows/audit.yml
+    permissions:
+      contents: read
+
+  codeql:
+    needs: classify
+    if: needs.classify.outputs.docs_only != 'true'
+    uses: ./.github/workflows/codeql.yml
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+  actionlint:
+    needs: classify
+    if: needs.classify.outputs.docs_only != 'true'
+    uses: ./.github/workflows/actionlint.yml
+    permissions:
+      contents: read
+
+  aggregate:
+    needs: [classify, tests, lint, types, audit, codeql, actionlint]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check no tracked file carries a merge-conflict marker
+        run: |
+          # git grep exits 1 for no match and above 1 when it could not run;
+          # reading that error as a clean tree would be a false green.
+          found=0
+          git grep -nI -E '^(<{7}( |$)|>{7}( |$)|={7}$)' -- . || found=$?
+          if [ "$found" -gt 1 ]; then
+            echo "git grep exited $found, so no marker was looked for."
+            exit "$found"
+          fi
+          if [ "$found" -eq 0 ]; then
+            echo "A merge-conflict marker is committed. Resolve the conflict, rebase onto the target branch and push again."
+            exit 1
+          fi
+
+      - name: Fold the leg results into one verdict
+        env:
+          SESSION_ARCHIVERS_NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/aggregate_gate.py

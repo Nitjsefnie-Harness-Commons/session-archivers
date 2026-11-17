@@ -38,7 +38,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ["3.11", "3.12", "3.13", "3.14"]
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
 
@@ -102,8 +102,8 @@ jobs:
 
   coverage:
     # A JOB of its own, not steps inside the matrix above: the matrix is
-    # 3 OSes x 4 Pythons, and coverage of the same code twelve times over
-    # tells you the same number twelve times. One run, on one Python
+    # 3 OSes x 5 Pythons, and coverage of the same code fifteen times over
+    # tells you the same number fifteen times. One run, on one Python
     # and the cheapest runner.
     runs-on: ubuntu-latest
     timeout-minutes: 20

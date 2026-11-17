@@ -1,0 +1,94 @@
+{
+  ".github/dependabot.yml": [
+    1102,
+    1476
+  ],
+  ".github/workflows/actionlint.yml": [
+    2038,
+    3276
+  ],
+  ".github/workflows/audit.yml": [
+    1333,
+    2503
+  ],
+  ".github/workflows/codeql.yml": [
+    1619,
+    2413
+  ],
+  ".github/workflows/lint.yml": [
+    697,
+    1759
+  ],
+  ".github/workflows/pr-gate.yml": [
+    427,
+    1095
+  ],
+  ".github/workflows/release.yml": [
+    1400,
+    2691
+  ],
+  ".github/workflows/tag.yml": [
+    2820,
+    5680
+  ],
+  ".github/workflows/tests.yml": [
+    2664,
+    5682
+  ],
+  ".github/workflows/types.yml": [
+    704,
+    1300
+  ],
+  "session_archivers/__init__.py": [
+    1560,
+    1579
+  ],
+  "session_archivers/claude.py": [
+    5540,
+    11872
+  ],
+  "session_archivers/codex.py": [
+    6007,
+    12062
+  ],
+  "session_archivers/kimi.py": [
+    2795,
+    10236
+  ],
+  "session_archivers/provider.py": [
+    3409,
+    4816
+  ],
+  "session_archivers/runtime.py": [
+    2417,
+    4009
+  ],
+  "session_archivers/settings.py": [
+    1518,
+    2397
+  ],
+  "session_archivers/store.py": [
+    4531,
+    8545
+  ],
+  "tests/_util.py": [
+    2493,
+    5960
+  ],
+  "tests/test_archiver_behaviour.py": [
+    3837,
+    15725
+  ],
+  "tests/test_package_contract.py": [
+    1194,
+    4009
+  ],
+  "tests/test_runtime.py": [
+    1591,
+    6327
+  ],
+  "tests/test_store.py": [
+    4014,
+    16823
+  ]
+}

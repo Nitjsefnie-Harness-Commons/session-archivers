@@ -45,5 +45,17 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
+    # Grouped so codeql-action's `init` and `analyze`, which must share one
+    # version or `analyze` fails, bump in a single pull request. A group
+    # covers version updates only unless it names `applies-to`, so security
+    # updates, which are enabled here, get a group of their own.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+      github-actions-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
     labels:
       - dependencies

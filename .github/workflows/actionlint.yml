@@ -51,6 +51,7 @@ concurrency:
 jobs:
   actionlint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     env:
       # Nitjsefnie-OSC/actionlint, not stock rhysd/actionlint: upstream 1.7.12

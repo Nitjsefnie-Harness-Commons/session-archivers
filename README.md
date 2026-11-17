@@ -59,7 +59,10 @@ the session was filed under; one that does not stays, and the run logs
 `kept, not verified in the bucket`.
 
 The Codex archiver keeps a rollout whose thread-writer lock a live Codex
-process still holds, however old it is. After the rollout pass it also prunes
+process still holds, however old it is. It uploads every rollout in
+`~/.codex/archived_sessions/` too, under the key it would have in `sessions/`, and
+never deletes one there, whatever its age: Codex unarchives a thread by moving
+its rollout back into `sessions/`. After the rollout pass it also prunes
 `~/.codex/thread_history_1.sqlite`, Codex's rebuildable projection of the
 rollouts. Codex cannot read a thread's rows there once the rollout is gone,
 and nothing else deletes them. The prune keeps every thread that has a rollout

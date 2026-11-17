@@ -956,14 +956,22 @@ def _rollout(sessions, day, uuid, meta, days_old=None):
     return _write(sessions / "2026" / "08" / day / name, body, days_old=days_old)
 
 
+def _codex_walk(sessions, dest, cutoff):
+    """`archive_rollouts` over `sessions` and its archived_sessions sibling."""
+    with sandbox(_CODEX, SESSIONS_DIR=sessions,
+                 ARCHIVED_SESSIONS_DIR=sessions.parent / "archived_sessions"):
+        return _CODEX.archive_rollouts(dest, cutoff)
+
+
 def test_codex_finds_every_rollout_under_the_date_buckets(tmp):
     sessions = Path(tmp) / "sessions"
     _rollout(sessions, "21", "1-2-3-4-5", {"session_id": "t1", "cwd": "/a"})
     _rollout(sessions, "20", "6-7-8-9-0", {"session_id": "t2", "cwd": "/b"})
-    with sandbox(_CODEX, SESSIONS_DIR=sessions):
+    absent = Path(tmp) / "absent"
+    with sandbox(_CODEX, SESSIONS_DIR=sessions, ARCHIVED_SESSIONS_DIR=absent):
         found = _CODEX.find_rollouts()
     assert [p.parent.name for p in found] == ["20", "21"]
-    with sandbox(_CODEX, SESSIONS_DIR=Path(tmp) / "absent"):
+    with sandbox(_CODEX, SESSIONS_DIR=absent, ARCHIVED_SESSIONS_DIR=absent):
         assert _CODEX.find_rollouts() == []
 
 
@@ -972,8 +980,7 @@ def test_codex_archives_a_main_rollout_under_its_thread_id(tmp):
     _rollout(sessions, "21", "1-2-3-4-5", {"session_id": "thread-a", "cwd": "/proj"})
     phash = _CODEX.project_hash("/proj")
     dest, client, _ = _dest()
-    with sandbox(_CODEX, SESSIONS_DIR=sessions):
-        assert _CODEX.archive_rollouts(dest, _cutoff()) == (2, 0, 0, 0)
+    assert _codex_walk(sessions, dest, _cutoff()) == (2, 0, 0, 0)
     assert f"sessions/{phash}/thread-a/wire.jsonl.xz" in client.objects
     assert json.loads(client.objects[f"sessions/{phash}/project.json"]) == {
         "path": "/proj"}
@@ -987,9 +994,7 @@ def test_codex_keys_a_subagent_rollout_per_file(tmp):
               "parent_thread_id": "thread-a"})
     phash = _CODEX.project_hash("/proj")
     dest, client, _ = _dest()
-    with sandbox(_CODEX, SESSIONS_DIR=sessions):
-        uploaded, _, failed, _ = _CODEX.archive_rollouts(dest, _cutoff())
-    assert (uploaded, failed) == (2, 0)
+    assert _codex_walk(sessions, dest, _cutoff()) == (2, 0, 0, 0)
     assert (f"sessions/{phash}/thread-a/subagents/aaaa-bb-cc-dd-eeee/wire.jsonl.xz"
             in client.objects)
 
@@ -1001,18 +1006,24 @@ def test_codex_skips_a_rollout_with_no_session_meta(tmp):
            / "rollout-2026-08-21T10-00-00-1-2-3-4-5.jsonl",
            '{"type": "event_msg"}\n')
     dest, client, _ = _dest()
-    with sandbox(_CODEX, SESSIONS_DIR=sessions):
-        assert _CODEX.archive_rollouts(dest, _cutoff()) == (0, 0, 0, 1)
+    assert _codex_walk(sessions, dest, _cutoff()) == (0, 0, 0, 1)
     assert client.objects == {}
 
 
-def test_codex_deletes_a_stale_rollout_only_once_it_is_in_the_bucket(tmp):
+def test_codex_deletes_a_stale_stored_rollout_but_never_an_archived_one(tmp):
+    """Codex unarchives a thread by moving its rollout back into sessions/."""
     sessions = Path(tmp) / "sessions"
     path = _rollout(sessions, "21", "1-2-3-4-5",
                     {"session_id": "t", "cwd": "/proj"}, days_old=10)
-    dest, _, said = _dest()
-    with sandbox(_CODEX, SESSIONS_DIR=sessions):
-        assert _CODEX.archive_rollouts(dest, _cutoff()) == (2, 1, 0, 0)
+    (Path(tmp) / "archived_sessions").mkdir()
+    archived = path.rename(Path(tmp) / "archived_sessions" / path.name)
+    dest, archived_client, _ = _dest()
+    assert _codex_walk(sessions, dest, _cutoff()) == (2, 0, 0, 0)
+    assert archived.exists()
+    archived.rename(path)
+    dest, client, said = _dest()
+    assert _codex_walk(sessions, dest, _cutoff()) == (2, 1, 0, 0)
+    assert sorted(archived_client.objects) == sorted(client.objects)
     assert not path.exists()
     assert not any(_KEPT in line for line in said), said
 
@@ -1054,8 +1065,7 @@ def test_codex_dry_run_previews_the_deletion_a_real_run_makes(tmp):
     path = _rollout(sessions, "21", "1-2-3-4-5",
                     {"session_id": "t", "cwd": "/proj"}, days_old=10)
     dest, client, said = _dest(dry_run=True)
-    with sandbox(_CODEX, SESSIONS_DIR=sessions):
-        _CODEX.archive_rollouts(dest, _cutoff())
+    _codex_walk(sessions, dest, _cutoff())
     assert client.puts == []
     assert path.exists()
     assert f"  DRY rm {path}" in said, said
@@ -1065,12 +1075,9 @@ def test_codex_counts_a_failed_rollout_upload_and_keeps_the_file(tmp):
     sessions = Path(tmp) / "sessions"
     path = _rollout(sessions, "21", "1-2-3-4-5",
                     {"session_id": "t", "cwd": "/proj"}, days_old=10)
-    phash = _CODEX.project_hash("/proj")
     dest, client, said = _dest()
-    client.fail_puts.add(f"sessions/{phash}/t/wire.jsonl.xz")
-    with sandbox(_CODEX, SESSIONS_DIR=sessions):
-        uploaded, deleted, failed, _ = _CODEX.archive_rollouts(dest, _cutoff())
-    assert (uploaded, deleted, failed) == (1, 0, 1)
+    client.fail_puts.add(f"sessions/{_CODEX.project_hash('/proj')}/t/wire.jsonl.xz")
+    assert _codex_walk(sessions, dest, _cutoff()) == (1, 0, 1, 0)
     assert path.exists()
     assert any("upload failed" in line for line in said)
 
@@ -1078,12 +1085,9 @@ def test_codex_counts_a_failed_rollout_upload_and_keeps_the_file(tmp):
 def test_codex_counts_a_failed_marker_upload(tmp):
     sessions = Path(tmp) / "sessions"
     _rollout(sessions, "21", "1-2-3-4-5", {"session_id": "t", "cwd": "/proj"})
-    phash = _CODEX.project_hash("/proj")
     dest, client, said = _dest()
-    client.fail_puts.add(f"sessions/{phash}/project.json")
-    with sandbox(_CODEX, SESSIONS_DIR=sessions):
-        uploaded, _, failed, _ = _CODEX.archive_rollouts(dest, _cutoff())
-    assert (uploaded, failed) == (1, 1)
+    client.fail_puts.add(f"sessions/{_CODEX.project_hash('/proj')}/project.json")
+    assert _codex_walk(sessions, dest, _cutoff()) == (1, 0, 1, 0)
     assert any("marker upload failed" in line for line in said)
 
 
@@ -1091,24 +1095,20 @@ def test_codex_publishes_one_marker_per_project_not_per_rollout(tmp):
     sessions = Path(tmp) / "sessions"
     _rollout(sessions, "21", "1-2-3-4-5", {"session_id": "t1", "cwd": "/proj"})
     _rollout(sessions, "20", "6-7-8-9-0", {"session_id": "t2", "cwd": "/proj"})
-    phash = _CODEX.project_hash("/proj")
     dest, client, _ = _dest()
-    with sandbox(_CODEX, SESSIONS_DIR=sessions):
-        uploaded, _, failed, _ = _CODEX.archive_rollouts(dest, _cutoff())
-    assert (uploaded, failed) == (3, 0)
+    assert _codex_walk(sessions, dest, _cutoff()) == (3, 0, 0, 0)
     assert [k for k in client.objects if k.endswith("project.json")] == [
-        f"sessions/{phash}/project.json"]
+        f"sessions/{_CODEX.project_hash('/proj')}/project.json"]
 
 
 def test_codex_main_archives_and_saves_the_manifest(tmp):
     sessions = Path(tmp) / "sessions"
     _rollout(sessions, "21", "1-2-3-4-5", {"session_id": "t", "cwd": "/proj"})
-    phash = _CODEX.project_hash("/proj")
     client = _util.FakeS3(_BUCKET)
     code, out = _run_main(_CODEX, tmp, ["archive-codex-sessions", "--days", "3"],
                           client, SESSIONS_DIR=sessions)
     assert code == 0
-    assert f"sessions/{phash}/t/wire.jsonl.xz" in client.objects
+    assert f"sessions/{_CODEX.project_hash('/proj')}/t/wire.jsonl.xz" in client.objects
     assert _STORE.manifest_key() in client.objects
     assert "uploaded=2 deleted=0 failed=0 skipped=0" in out
 
@@ -1116,9 +1116,8 @@ def test_codex_main_archives_and_saves_the_manifest(tmp):
 def test_codex_main_returns_one_when_an_upload_failed(tmp):
     sessions = Path(tmp) / "sessions"
     _rollout(sessions, "21", "1-2-3-4-5", {"session_id": "t", "cwd": "/proj"})
-    phash = _CODEX.project_hash("/proj")
     client = _util.FakeS3(_BUCKET)
-    client.fail_puts.add(f"sessions/{phash}/t/wire.jsonl.xz")
+    client.fail_puts.add(f"sessions/{_CODEX.project_hash('/proj')}/t/wire.jsonl.xz")
     code, out = _run_main(_CODEX, tmp, ["archive-codex-sessions"], client,
                           SESSIONS_DIR=sessions)
     assert code == 1

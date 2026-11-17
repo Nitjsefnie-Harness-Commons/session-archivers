@@ -382,6 +382,22 @@ def test_holds_dir_is_false_when_one_file_was_never_uploaded(tmp):
     assert not dest.holds_dir(root, "p")
 
 
+def test_a_dry_run_counts_what_it_would_upload_as_held(tmp):
+    """So the preview shows the deletions a real run would make."""
+    dest, client, _ = _store(dry_run=True)
+    src = _write(Path(tmp) / "wire.jsonl", "x\n" * 100)
+    root = Path(tmp) / "data"
+    _write(root / "blob.bin", _incompressible(4096))
+    _write(root / "old.jsonl.xz", lzma.compress(b"x"))
+    other = _write(Path(tmp) / "other.jsonl", "y\n")
+    assert dest.upload_file(src, "k/wire.jsonl")
+    assert dest.upload_dir(root, "p") == 2
+    assert dest.holds(src, "k/wire.jsonl")
+    assert dest.holds_dir(root, "p")
+    assert not dest.holds(other, "k/other.jsonl")  # never planned
+    assert client.puts == []
+
+
 def test_a_real_run_never_counts_a_failed_upload_as_held(tmp):
     dest, client, _ = _store()
     src = _write(Path(tmp) / "blob.bin", b"NEW!")
@@ -569,6 +585,35 @@ def test_a_dry_run_reports_the_upload_without_making_it(tmp):
     assert client.puts == []
     assert dest.manifest == {}
     assert any("DRY upload k/wire.jsonl" in line for line in said)
+
+
+def test_a_dry_run_names_the_xz_key_a_text_upload_lands_under(tmp):
+    """A text key is always stored at `<key>.xz`, so the preview can say so;
+    the size it can state without compressing is the input's."""
+    dest, _, said = _store(dry_run=True)
+    src = _write(Path(tmp) / "wire.jsonl", "x\n" * 1000)
+    assert dest.upload_file(src, "k/wire.jsonl")
+    assert said == ["  DRY upload k/wire.jsonl.xz "
+                    "(2,000 B uncompressed; compressed size not computed)"]
+
+
+def test_a_dry_run_does_not_guess_the_stored_form_of_a_binary(tmp):
+    """Plain or xz is decided by compressing it, which a preview skips."""
+    dest, _, said = _store(dry_run=True)
+    src = _write(Path(tmp) / "blob.bin", _incompressible(4096))
+    original = _STORE.lzma.compress
+
+    def _refuse(*_a, **_kw):
+        raise AssertionError("a dry run compressed its input")
+
+    _STORE.lzma.compress = _refuse
+    try:
+        assert dest.upload_file(src, "k/blob.bin")
+    finally:
+        _STORE.lzma.compress = original
+    assert said == ["  DRY upload k/blob.bin or k/blob.bin.xz "
+                    "(4,096 B uncompressed; stored form undetermined until "
+                    "upload)"]
 
 
 def test_a_dry_run_reports_a_verbatim_upload_without_making_it(tmp):

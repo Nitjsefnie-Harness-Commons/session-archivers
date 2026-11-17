@@ -1167,6 +1167,20 @@ def test_codex_dry_run_keeps_a_stale_rollout(tmp):
     assert any("DRY rm " in line for line in said)
 
 
+def test_codex_dry_run_previews_the_deletion_a_real_run_makes(tmp):
+    """Nothing is uploaded, but what the run would upload counts as stored,
+    so the preview lists the stale rollout a real run deletes."""
+    sessions = Path(tmp) / "sessions"
+    path = _rollout(sessions, "21", "1-2-3-4-5",
+                    {"session_id": "t", "cwd": "/proj"}, days_old=10)
+    dest, client, said = _dest(dry_run=True)
+    with sandbox(_CODEX, SESSIONS_DIR=sessions):
+        _CODEX.archive_rollouts(dest, _cutoff())
+    assert client.puts == []
+    assert path.exists()
+    assert f"  DRY rm {path}" in said, said
+
+
 def test_codex_counts_a_failed_rollout_upload_and_keeps_the_file(tmp):
     sessions = Path(tmp) / "sessions"
     path = _rollout(sessions, "21", "1-2-3-4-5",

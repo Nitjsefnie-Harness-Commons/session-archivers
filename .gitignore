@@ -34,8 +34,11 @@
 !/README.md
 !/pyproject.toml
 !/pyrightconfig.json
+!/requirements-build.txt
 !/requirements-dev.txt
+!/requirements-pip-audit.txt
 !/requirements-test.txt
+!/requirements-zizmor.txt
 !/run_tests.py
 !/setup.cfg
 

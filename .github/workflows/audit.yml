@@ -5,9 +5,9 @@ name: audit
 # PyPI advisory database and OSV.
 #
 # This repo has BOTH a runtime dependency (boto3, declared in
-# pyproject.toml rather than a requirements file) and a pinned toolchain,
-# so the audit takes two passes — see the step below for why they cannot be
-# one invocation.
+# pyproject.toml rather than a requirements file) and pinned toolchain
+# manifests, so the audit takes several passes — see the step below for why
+# they cannot be one invocation.
 
 on:
   push:
@@ -47,13 +47,11 @@ jobs:
           cache: pip
 
       - name: Install pip-audit
-        run: |
-          python -m pip install --upgrade pip
-          pip install pip-audit==2.10.1
+        run: python -m pip install -r requirements-pip-audit.txt
 
       - name: Audit dependencies
-        # TWO passes, because pip-audit's project mode and `-r` are mutually
-        # exclusive and this repo needs both:
+        # Several passes, because pip-audit's project mode and `-r` are
+        # mutually exclusive and this repo needs both:
         #
         #   `.`  reads pyproject.toml, so it covers boto3 — the
         #        dependency that actually ships to anyone who installs this.
@@ -62,7 +60,10 @@ jobs:
         #
         #   `-r` covers the toolchain, which runs in CI holding the
         #        repository token. A compromised linter is a supply-chain
-        #        problem even though it never ships.
+        #        problem even though it never ships. One call per
+        #        requirements*.txt (the glob picks up a new manifest): one
+        #        call resolves all its files in a single pip dry-run, where a
+        #        hashed manifest beside an un-hashed one fails the latter.
         #
         # Resolution is the point in both: a declared dependency drags in a
         # tree of its own, and that is where an advisory lands.
@@ -100,6 +101,14 @@ jobs:
           audit .
           echo "::endgroup::"
 
-          echo "::group::toolchain"
-          audit -r requirements-dev.txt -r requirements-test.txt
-          echo "::endgroup::"
+          shopt -s nullglob
+          manifests=(requirements*.txt)
+          if [ "${#manifests[@]}" -eq 0 ]; then
+            echo "no requirements*.txt manifest at the repository root; nothing to audit" >&2
+            exit 1
+          fi
+          for manifest in "${manifests[@]}"; do
+            echo "::group::$manifest"
+            audit -r "$manifest"
+            echo "::endgroup::"
+          done

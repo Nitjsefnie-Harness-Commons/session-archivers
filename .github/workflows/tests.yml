@@ -55,9 +55,7 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: Install the package and its declared dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install .
+        run: pip install .
 
       - name: Run every archiver suite
         env:
@@ -84,7 +82,7 @@ jobs:
 
       - name: Build the wheel
         run: |
-          python -m pip install --upgrade pip build
+          python -m pip install --require-hashes -r requirements-build.txt
           python -m build --wheel
 
       - name: Install it with no checkout in reach and run every command
@@ -122,8 +120,7 @@ jobs:
 
       - name: Install the coverage toolchain and the project
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-test.txt
+          python -m pip install --require-hashes -r requirements-test.txt
           # `.` too, for the project's own runtime dependencies. Without it a
           # suite that IMPORTS the package cannot import it at all, every
           # suite dies on ModuleNotFoundError, and the job goes on to report

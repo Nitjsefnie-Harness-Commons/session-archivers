@@ -4,19 +4,17 @@
 # how a fixed CVE stays exploitable. Dependabot pays that cost back — it is
 # the counterpart to audit.yml, which detects the problem but cannot fix it.
 #
-# Note the interaction with the repo's CI policy: PRs are not built until an
-# approving review lands (see tests.yml), so a Dependabot PR sits unbuilt
-# until a human looks at it. That is the existing policy working as intended,
-# not an extra cost of enabling this — an unreviewed bump is exactly the kind
-# of change that should not get a runner.
-#
 # There is no npm entry: this repo has no JavaScript at all.
 
 version: 2
 updates:
-  # requirements-dev.txt (lint/type toolchain) and requirements-test.txt
-  # (coverage). There is no runtime entry: the distributed package is
-  # stdlib-only on purpose, so these tool pins are the entire pip surface.
+  # Every requirements*.txt at the root: requirements-dev.txt (lint/type
+  # toolchain), requirements-test.txt (coverage), requirements-build.txt
+  # (the wheel build), requirements-zizmor.txt and requirements-pip-audit.txt
+  # (the two gates installed from manifests because Dependabot reads no
+  # `run:` block). The hashed ones are rewritten with their hashes. The
+  # package and boto3 are declared in pyproject.toml and are not pinned here:
+  # the distributed package is stdlib-only on purpose besides boto3.
   - package-ecosystem: pip
     directory: "/"
     schedule:

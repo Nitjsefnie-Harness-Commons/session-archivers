@@ -53,16 +53,17 @@ archive-codex-sessions  [--days N] [--dry-run]
 
 `--dry-run` previews every action and writes nothing, locally or remotely.
 `--days` sets the retention threshold for the delete gate; upload is
-independent of it. A stale session or archived file is removed only once
+independent of it. A stale session or uploaded file is removed only once
 the bucket verifiably holds every file in it, in every bucket the session
-was filed under; one that does not stays, and the run logs
-`kept, not verified in the bucket`.
+was filed under; one that does not stays, and the run logs why:
+`kept, not verified in the bucket`, a failed upload, or a bucket it could
+not list.
 
 The Codex archiver keeps a rollout whose thread-writer lock a live Codex
 process still holds, however old it is. It uploads every rollout in
-`~/.codex/archived_sessions/` too, under the key it would have in `sessions/`, and
-never deletes one there, whatever its age: Codex unarchives a thread by moving
-its rollout back into `sessions/`. After the rollout pass it also prunes
+`~/.codex/archived_sessions/` too, under the key it would have in `sessions/`,
+and never deletes one there, whatever its age: Codex unarchives a thread by
+moving its rollout back into `sessions/`. After the rollout pass it also prunes
 `~/.codex/thread_history_1.sqlite`, Codex's rebuildable projection of the
 rollouts. Codex cannot read a thread's rows there once the rollout is gone,
 and nothing else deletes them. The prune keeps every thread that has a rollout

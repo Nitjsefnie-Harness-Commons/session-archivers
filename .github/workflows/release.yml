@@ -75,7 +75,7 @@ jobs:
         # Python 3.13, reproduce the published hash.
         run: |
           umask 022
-          git ls-files -z | xargs -0 chmod a+rX,go-w
+          git ls-files -z | xargs -0 chmod a+rX,go-w --
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
           export SOURCE_DATE_EPOCH
           python -m build --wheel

@@ -30,8 +30,11 @@
 # ─── root ───
 !/.gitignore
 !/.pylintrc
+!/CODE_OF_CONDUCT.md
+!/CONTRIBUTING.md
 !/LICENSE
 !/README.md
+!/SECURITY.md
 !/pyproject.toml
 !/pyrightconfig.json
 !/requirements-build.txt
@@ -45,6 +48,8 @@
 # ─── .github/workflows ───
 !/.github/
 !/.github/workflows/
+!/.github/ISSUE_TEMPLATE/
+!/.github/ISSUE_TEMPLATE/issue.md
 !/.github/PULL_REQUEST_TEMPLATE.md
 !/.github/comment-share.json
 !/.github/dependabot.yml

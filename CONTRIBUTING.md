@@ -138,9 +138,10 @@ and that `git status --porcelain` lists only what you meant to add.
 ## Commit messages
 
 Conventional Commits: `type(scope): subject`, the scope and a `!` optional; the
-`pr gate` checks commit subjects against it. Beyond the subject grammar nothing
-is checked, and the house convention is an imperative subject with no trailing
-full stop and a body that says why the change was needed.
+`pr gate` checks commit subjects against it. Beyond the subject grammar only
+the workflow-scope rule below is checked, and the house convention is an
+imperative subject with no trailing full stop and a body that says why the
+change was needed.
 
 | Type | For |
 |---|---|
@@ -159,6 +160,9 @@ full stop and a body that says why the change was needed.
 A scope names what the change is about, not the directory it landed in:
 `ci(codeql): analyse the actions language as well`, `docs(readme): describe the
 audit as it now runs`, `fix(codex): keep a rollout whose writer lock is held`.
+A scope naming a workflow (its top-level `name:`, such as `tests` or `ci gate`)
+is valid only with type `ci`, compared case-insensitively; `ci gate` refuses a
+pull request carrying a commit that pairs one with any other type.
 A manifest bump written by hand uses `ci(deps)`, as this repository's own
 manifest commits do; Dependabot's pull requests carry the prefix
 `.github/dependabot.yml` configures (`deps` for the pip manifests, `ci` for the

@@ -12,8 +12,8 @@
     2503
   ],
   ".github/workflows/codeql.yml": [
-    1619,
-    2413
+    1589,
+    2448
   ],
   ".github/workflows/lint.yml": [
     697,
@@ -36,8 +36,8 @@
     5682
   ],
   ".github/workflows/types.yml": [
-    704,
-    1300
+    699,
+    1306
   ],
   "session_archivers/__init__.py": [
     1560,

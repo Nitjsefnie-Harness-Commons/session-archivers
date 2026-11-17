@@ -76,6 +76,9 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       # Written only after the tag push succeeded: `bump` keys on it.
       pushed: ${{ steps.push.outputs.pushed }}
+      # 'false' only when a push found the release version's tag already
+      # there (a dispatch errors instead): `bump` keys on that too.
+      free: ${{ steps.free.outputs.free }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -263,17 +266,20 @@ jobs:
             echo "and publishes the wheel and its checksums from there."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Moves main off the version just released, so no later commit claims
-  # the name of a published wheel. The commit it pushes carries a .dev0
-  # version, which the version step above never tags: no loop.
+  # Moves main off a released version, so no later commit claims the name
+  # of a published wheel: after this run pushed the tag, and on any push
+  # that finds the tag already there, such as one landing after the
+  # release but before main left its version. If main already left it,
+  # the job stops green. The commit it pushes carries a .dev0 version,
+  # which the version step above never tags: no loop.
   bump:
     needs: tag
     # Not on the tag job's success: a failed dispatch after the push still
     # leaves a released version on main. GitHub's docs do not say whether
     # a failed job's outputs reach its dependents; if not, `pushed` reads
     # empty, this job is skipped as under success(), and main keeps the
-    # released version until someone bumps it.
-    if: ${{ !cancelled() && needs.tag.outputs.pushed == 'true' }}
+    # released version until the next push the gates run on bumps it.
+    if: ${{ !cancelled() && (needs.tag.outputs.pushed == 'true' || needs.tag.outputs.free == 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Holds the deploy key: a deploy key is the only bypass main's rules

@@ -67,7 +67,14 @@ jobs:
         run: python run_tests.py
 
       - name: Build the wheel
-        run: python -m build --wheel
+        # The zip entries' timestamps come from SOURCE_DATE_EPOCH, set to
+        # the tagged commit's own time, and pyproject.toml pins the
+        # backend: a rebuild from the tag then reproduces the published
+        # hash instead of one that differs only in file dates.
+        run: |
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
+          python -m build --wheel
 
       - name: Publish checksums beside the wheel
         working-directory: dist

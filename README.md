@@ -183,7 +183,7 @@ branches that need an unwritable filesystem to reach.
 
 | Workflow | What it does |
 | --- | --- |
-| `tests` | `run_tests.py` across 3 OSes × 3 Pythons, plus a single-run coverage job — the matrix would otherwise report the same coverage number nine times. |
+| `tests` | `run_tests.py` across 3 OSes × 4 Pythons, plus a single-run coverage job — the matrix would otherwise report the same coverage number twelve times. |
 | `lint` / `types` | pylint + pycodestyle, and pyright. |
 | `codeql` | Security analysis (Python only — no JS here). Findings go to the Security tab, never the build. Weekly cron on top of push, because a query published today would otherwise only ever run against files touched after it shipped. |
 | `audit` | `pip-audit` over both requirements files, resolving the full transitive tree. **Daily** cron: this answers "is a version we froze months ago still safe", and that answer changes with no commit here to hang it on. |

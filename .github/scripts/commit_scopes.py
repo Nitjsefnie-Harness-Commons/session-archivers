@@ -67,7 +67,7 @@ def main() -> int:
         kind, scope = subject[1].lower(), subject[2].lower()
         if scope in names and kind != 'ci':
             bad.append(f'  {record}\n    scope `{subject[2]}` names {names[scope]}; type `{subject[1]}` is not `ci`')
-    print(f'Examined {examined} subjects in main..head; {len(skipped)} not examined:')
+    print(f"Examined {examined} subject{'' if examined == 1 else 's'} in main..head; {len(skipped)} not examined:")
     print(''.join(f'  {record}\n' for record in skipped), end='')
     if bad:
         print("A workflow's name is a scope only with type `ci`:\n" + '\n'.join(bad))

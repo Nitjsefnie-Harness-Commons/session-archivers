@@ -9,6 +9,13 @@
 # where it is conditional. Each pin lists every release file, so the file
 # installs on any platform and any Python 3.11 or newer. Dependabot's root
 # pip entry rewrites a pin and its hashes together.
+#
+# Dependabot rewrites one pinned line per bump and never adds a new
+# transitive dependency, so a bump that adds or tightens one is regenerated
+# with this command, run from the repository root, its output replacing every
+# pin below. It reads the top-level pins from this file, so a bumped pin
+# stays bumped:
+#   grep -E '^(pycodestyle|pylint|pyright)==' requirements-dev.txt | cut -d' ' -f1 | uv pip compile --generate-hashes --universal --python-version 3.11 --no-header -
 astroid==4.3.4 \
     --hash=sha256:2bcd0d02648a443a4b818c952c3550091989daefac3c12d3b83b2289482e0818 \
     --hash=sha256:d515a105722b72098bbe82d430d65e635f742b6cbac3bdfaf8b7c188b87c5e39

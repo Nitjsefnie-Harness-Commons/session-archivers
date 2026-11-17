@@ -8,7 +8,7 @@ name: types
 # Windows-spelled paths on a Linux box and vice versa, and the branches for
 # each are guarded at runtime, not by the platform the check happens to run on.
 #
-# No runtime dependencies to install -- the package is stdlib-only.
+# The one runtime dependency, boto3, installs with `.` below.
 
 on:
   push:

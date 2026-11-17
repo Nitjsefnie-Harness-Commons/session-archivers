@@ -66,9 +66,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # No `ref:` here, unlike the other workflows: CodeQL must analyse
-          # exactly the commit it will file alerts against, which is the
-          # event's own SHA.
+          # No `ref:` here: CodeQL must analyse exactly the commit it will
+          # file alerts against, which is the event's own SHA.
           persist-credentials: false
 
       - name: Initialize CodeQL
@@ -76,10 +75,10 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-          # `security-extended` over the default `security` pack: this code parses
-          # untrusted transcript and config files off disk and builds paths
-          # from their contents, which is what the extra precision-medium
-          # queries are good at.
+          # `security-extended` over the default `security` pack: the Python
+          # reads untrusted transcript and config files and builds paths from
+          # them, and the workflows run with a repository token; the extra
+          # precision-medium queries are good at both.
           queries: security-extended
 
       - name: Analyze

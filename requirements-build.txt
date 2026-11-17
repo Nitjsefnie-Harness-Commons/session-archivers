@@ -9,6 +9,13 @@
 # platform and any Python 3.11 or newer. The wheel build's own backend
 # (setuptools, from pyproject.toml's build-system.requires) is resolved by
 # build in its isolated environment and is not covered by these hashes.
+#
+# Dependabot rewrites one pinned line per bump and never adds a new
+# transitive dependency, so a bump that adds or tightens one is regenerated
+# with this command, run from the repository root, its output replacing every
+# pin below. It reads the top-level pins from this file, so a bumped pin
+# stays bumped:
+#   grep -E '^build==' requirements-build.txt | cut -d' ' -f1 | uv pip compile --generate-hashes --universal --python-version 3.11 --no-header -
 build==1.6.1 \
     --hash=sha256:51cc11666391ab6f092070437ac747002ff46f3e4113a3622177ee6b488bfc53 \
     --hash=sha256:ecd351a4be9d35a9eaaba244a7687143c9c7d4aea6ac964e7e7ddab20cbcf4e7

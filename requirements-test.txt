@@ -1,11 +1,11 @@
 # Test-only toolchain, pinned so a tool release cannot turn CI red on an
 # unchanged commit (same reason as requirements-dev.txt).
 #
-# The SUITE itself needs nothing: it is stdlib unittest driven by
-# run_tests.py, and the package is stdlib-only on purpose. `coverage` is
-# here for the gate in tests.yml, which also calls `--format=markdown` and
-# `--fail-under` directly so the gate is a step of its own and the summary
-# still renders when it is red.
+# The SUITE itself needs nothing from here: it is stdlib unittest driven by
+# run_tests.py, and the package's one runtime dependency, boto3, comes from
+# pyproject.toml. `coverage` is here for the gate in tests.yml, which also
+# calls `--format=markdown` and `--fail-under` directly so the gate is a step
+# of its own and the summary still renders when it is red.
 #
 # Coverage runs each suite as its own subprocess with --parallel-mode and
 # then combines, because that is exactly what run_tests.py does. Running
@@ -20,6 +20,13 @@
 #
 # Hash-pinned and installed with --require-hashes, like requirements-dev.txt;
 # every release file of the pin is listed, so it installs on any platform.
+#
+# Dependabot rewrites one pinned line per bump and never adds a new
+# transitive dependency, so a bump that adds or tightens one is regenerated
+# with this command, run from the repository root, its output replacing every
+# pin below. It reads the top-level pins from this file, so a bumped pin
+# stays bumped:
+#   grep -E '^coverage==' requirements-test.txt | cut -d' ' -f1 | uv pip compile --generate-hashes --universal --python-version 3.11 --no-header -
 coverage==7.15.4 \
     --hash=sha256:002a438859f7b430bc99afeaf01a6d187dad1d0dc907b64cdeffc632a5db8fd8 \
     --hash=sha256:050467a7983b8e2fe7dd41a78bb30c3e7f8c0b8cafda14b1c46f8b5e3cf2dd3c \

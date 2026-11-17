@@ -19,11 +19,13 @@ Behaviour per run:
        anywhere: it is logged and left in place. Upload (skipped while the
        manifest signature matches; idempotent), then delete locally if
        jsonl mtime > DAYS — only once
-       every family's upload succeeded.
+       every family's upload succeeded and every family's bucket
+       verifiably holds the transcript and the data dir.
      Pass 2 — orphan UUID dirs (no matching jsonl, excluding memory/, tasks/):
        classified by the transcript inside them when one is there; a dir with
        no transcript records no model and is skipped like any other
-       unclassified session; upload always, delete if dir mtime > DAYS.
+       unclassified session; upload always, delete if dir mtime > DAYS and
+       every family's bucket verifiably holds every file in it.
 4. Log a one-liner summary to ~/.claude/cleanup-sessions.log.
 
 Only the WALK is here. The destination — key layout, compression policy,
@@ -206,6 +208,12 @@ def _skip_line(path, unknowns):
     return f'skipped unknown-model session: {path}: {ids}'
 
 
+def _keep_unverified(dest, path):
+    '''Log why a stale path stays: a bucket it went to does not verifiably
+    hold all of it.'''
+    dest.log(f'  kept, not verified in the bucket: {path}')
+
+
 def cleanup_local(cutoff, dry_run, log):
     '''Delete ~/.claude/{debug/*, file-history/*/, telemetry/*} past `cutoff`.'''
     runtime.sweep_files(DEBUG_DIR, cutoff, dry_run, log)
@@ -285,6 +293,14 @@ def archive_projects(dest, zai_dest, cutoff, llama_dest=None,
             if not ok or not runtime.is_old(jsonl, cutoff):
                 continue
 
+            # Every route the session went to must hold every object.
+            if not all(route.holds(jsonl, f'{r2_prefix}/{uuid}.jsonl')
+                       and (not uuid_dir.is_dir()
+                            or route.holds_dir(uuid_dir, f'{r2_prefix}/data'))
+                       for route in targets):
+                _keep_unverified(dest, jsonl)
+                continue
+
             if dest.dry_run:
                 dest.log(f'  DRY rm {jsonl}')
                 if uuid_dir.is_dir():
@@ -314,7 +330,8 @@ def archive_projects(dest, zai_dest, cutoff, llama_dest=None,
                 dest.log(f'unknown model ids in {sub}: '
                          f'{", ".join(sorted(unknowns))}')
             ok = True
-            for route in targets_for(families):
+            targets = targets_for(families)
+            for route in targets:
                 try:
                     n_uploaded += route.upload_dir(sub,
                                                    f'{project}/{sub.name}/data')
@@ -323,6 +340,10 @@ def archive_projects(dest, zai_dest, cutoff, llama_dest=None,
                     n_failed += 1
                     ok = False
             if not ok or not runtime.is_old(sub, cutoff):
+                continue
+            if not all(route.holds_dir(sub, f'{project}/{sub.name}/data')
+                       for route in targets):
+                _keep_unverified(dest, sub)
                 continue
             if dest.dry_run:
                 dest.log(f'  DRY rmtree {sub}')

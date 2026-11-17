@@ -11,11 +11,15 @@ Behaviour per run:
 3. For every session under ~/.kimi/sessions/<session_hash>/<uuid>/:
    upload every file (skipped while the manifest signature matches;
    idempotent), then delete locally
-   if the wire.jsonl mtime > DAYS.
-4. Archive ~/.kimi/user-history/<session_hash>.jsonl files.
+   if the wire.jsonl mtime > DAYS and the bucket verifiably holds every
+   file uploaded.
+4. Archive ~/.kimi/user-history/<session_hash>.jsonl files, deleting a stale
+   one only once the bucket verifiably holds it.
 5. Archive ~/.kimi-code/sessions/<wd_slug_hash>/<session-id>/ files,
    mapping agents/main/wire.jsonl -> sessions/<hash>/<uuid>/wire.jsonl and
    agents/<agent-N>/wire.jsonl -> sessions/<hash>/<uuid>/subagents/<agent-N>/wire.jsonl.
+   A stale session dir goes only once the bucket verifiably holds every
+   wire, subagent blob and state.json the walk uploads.
 6. Log a one-liner summary to ~/.kimi-code/archive-sessions.log.
 
 Only the WALKS are here. The destination — key layout, compression policy,
@@ -30,7 +34,7 @@ Flags:
 Exit code: 0 on success, 1 if any upload failed.
 '''
 
-__version__ = '2.0.0'
+__version__ = '2.0.1'
 # Cross-platform: must work on Linux AND Windows. No POSIX-only calls without a
 # Windows fallback. Bump __version__ (SemVer) on every substantive change.
 
@@ -160,6 +164,11 @@ def _publish_marker(dest, session_hash, path):
         return 0, 1
 
 
+def _keep_unverified(dest, path):
+    '''Log why a stale path stays: the bucket does not verifiably hold it.'''
+    dest.log(f'  kept, not verified in the bucket: {path}')
+
+
 def archive_kimi_code_sessions(dest, cutoff):
     '''Archive ~/.kimi-code/sessions/ using the same key layout as legacy.'''
     n_uploaded = n_deleted = n_failed = 0
@@ -195,8 +204,14 @@ def archive_kimi_code_sessions(dest, cutoff):
             r2_prefix = f'sessions/{session_hash}/{session_dir.name}'
             agents_dir = session_dir / 'agents'
 
+            # What the walk uploads, for the delete gate: (path, key) files
+            # and (dir, prefix) trees.
+            files = []
+            trees = []
+
             main_wire = session_dir / 'agents' / 'main' / 'wire.jsonl'
             if main_wire.is_file():
+                files.append((main_wire, f'{r2_prefix}/wire.jsonl'))
                 try:
                     if dest.upload_file(main_wire, f'{r2_prefix}/wire.jsonl'):
                         n_uploaded += 1
@@ -211,6 +226,7 @@ def archive_kimi_code_sessions(dest, cutoff):
                     sub_prefix = f'{r2_prefix}/subagents/{agent_dir.name}'
                     wire = agent_dir / 'wire.jsonl'
                     if wire.is_file():
+                        files.append((wire, f'{sub_prefix}/wire.jsonl'))
                         try:
                             if dest.upload_file(wire, f'{sub_prefix}/wire.jsonl'):
                                 n_uploaded += 1
@@ -219,6 +235,7 @@ def archive_kimi_code_sessions(dest, cutoff):
                             n_failed += 1
                     blobs = agent_dir / 'blobs'
                     if blobs.is_dir():
+                        trees.append((blobs, f'{sub_prefix}/blobs'))
                         try:
                             n_uploaded += dest.upload_dir(blobs, f'{sub_prefix}/blobs')
                         except Exception as e:  # pylint: disable=broad-except
@@ -227,6 +244,7 @@ def archive_kimi_code_sessions(dest, cutoff):
 
             state = session_dir / 'state.json'
             if state.is_file():
+                files.append((state, f'{r2_prefix}/state.json'))
                 try:
                     if dest.upload_file(state, f'{r2_prefix}/state.json'):
                         n_uploaded += 1
@@ -247,6 +265,11 @@ def archive_kimi_code_sessions(dest, cutoff):
                             or wire.stat().st_mtime > newest_wire.stat().st_mtime):
                         newest_wire = wire
             if newest_wire is not None and runtime.is_old(newest_wire, cutoff):
+                if not (all(dest.holds(path, key) for path, key in files)
+                        and all(dest.holds_dir(tree, prefix)
+                                for tree, prefix in trees)):
+                    _keep_unverified(dest, session_dir)
+                    continue
                 if dest.dry_run:
                     dest.log(f'  DRY rmtree {session_dir}')
                 else:
@@ -292,6 +315,9 @@ def archive_sessions(dest, cutoff):
 
             wire_jsonl = uuid_dir / 'wire.jsonl'
             if wire_jsonl.exists() and runtime.is_old(wire_jsonl, cutoff):
+                if not dest.holds_dir(uuid_dir, r2_prefix):
+                    _keep_unverified(dest, uuid_dir)
+                    continue
                 if dest.dry_run:
                     dest.log(f'  DRY rmtree {uuid_dir}')
                 else:
@@ -323,6 +349,9 @@ def archive_user_history(dest, cutoff):
             continue
 
         if runtime.is_old(entry, cutoff):
+            if not dest.holds(entry, key):
+                _keep_unverified(dest, entry)
+                continue
             if dest.dry_run:
                 dest.log(f'  DRY rm {entry}')
             else:

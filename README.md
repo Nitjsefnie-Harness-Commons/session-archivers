@@ -53,7 +53,9 @@ archive-codex-sessions  [--days N] [--dry-run]
 
 `--dry-run` previews every action and writes nothing, locally or remotely.
 `--days` sets the retention threshold for the delete gate; upload is
-independent of it, so a file is always uploaded before it can be removed.
+independent of it. A stale file is removed only once it is verified in the
+bucket, in every bucket its session was filed under; one that is not stays,
+and the run logs `kept, not verified in the bucket`.
 
 The Codex archiver keeps a rollout whose thread-writer lock a live Codex
 process still holds, however old it is. After the rollout pass it also prunes

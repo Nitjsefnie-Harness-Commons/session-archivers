@@ -9,22 +9,19 @@ Behaviour per run:
 2. Sweep kimi-local stale paths (files older than DAYS):
    ~/.kimi/logs/*, ~/.kimi/telemetry/*
 3. For every session under ~/.kimi/sessions/<session_hash>/<uuid>/:
-   upload every file (skipped while its manifest signature matches), then
-   delete locally if the wire.jsonl mtime > DAYS.
+   upload every file, then delete locally if the wire.jsonl mtime > DAYS.
 4. Archive ~/.kimi/user-history/<session_hash>.jsonl files.
 5. Archive ~/.kimi-code/sessions/<wd_slug_hash>/<session-id>/ files,
    mapping agents/main/wire.jsonl -> sessions/<hash>/<uuid>/wire.jsonl and
    agents/<agent-N>/wire.jsonl -> sessions/<hash>/<uuid>/subagents/<agent-N>/wire.jsonl.
 6. Log a one-liner summary to ~/.kimi-code/archive-sessions.log.
 
-Steps 3-5 delete a stale path only once the bucket verifiably holds
-everything the walk uploads from it (Kimi-Code: every wire, subagent blob
-and state.json).
+Steps 3-5 delete a stale path only once the bucket verifiably holds every
+file in it; Kimi-Code keeps a session with a wire.jsonl no leg uploads.
 
 Only the WALKS are here. The destination — key layout, compression policy,
 manifest, inventory — lives in store.py, and the host-side scaffolding —
-logging, locking, the retention predicate — in runtime.py, both shared with
-the Claude and Codex archivers.
+logging, locking, the retention predicate — in runtime.py.
 
 Flags:
   --days N    retention threshold for the delete gate (default 3)
@@ -245,6 +242,25 @@ def archive_kimi_code_sessions(dest, cutoff):
                     dest.log(f'upload failed: state={state} err={e}')
                     n_failed += 1
 
+            covered = {path for path, _ in files}
+            covered.update(p for tree, _ in trees for p in tree.rglob('*'))
+            stray_wire = False
+            for path in session_dir.rglob('*'):
+                if not path.is_file() or path in covered:
+                    continue
+                if path.name == 'wire.jsonl':
+                    # Any wire.jsonl key reads as a transcript: store none here.
+                    stray_wire = True
+                    continue
+                key = f'{r2_prefix}/{path.relative_to(session_dir).as_posix()}'
+                files.append((path, key))
+                try:
+                    if dest.upload_file(path, key):
+                        n_uploaded += 1
+                except Exception as e:  # pylint: disable=broad-except
+                    dest.log(f'upload failed: file={path} err={e}')
+                    n_failed += 1
+
             # Delete gate: the newest wire.jsonl mtime anywhere in the session.
             newest_wire = main_wire if main_wire.is_file() else None
             if agents_dir.is_dir():
@@ -258,7 +274,8 @@ def archive_kimi_code_sessions(dest, cutoff):
                             or wire.stat().st_mtime > newest_wire.stat().st_mtime):
                         newest_wire = wire
             if newest_wire is not None and runtime.is_old(newest_wire, cutoff):
-                if not (all(dest.holds(path, key) for path, key in files)
+                if stray_wire or not (
+                        all(dest.holds(path, key) for path, key in files)
                         and all(dest.holds_dir(tree, prefix)
                                 for tree, prefix in trees)):
                     runtime.log_kept_unverified(dest.log, session_dir)

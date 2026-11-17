@@ -8,23 +8,18 @@ name: lint
 # there for.
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - 'LICENSE'
-      - '.gitignore'
+  # Until the ruleset requires `aggregate`: the required pylint and
+  # pycodestyle checks come only from this run.
   pull_request:
+  workflow_call:
   workflow_dispatch:
 
-# Least privilege: this job only reads the tree. Without an explicit
-# block it inherits the repository default, which can be read/write
-# for the whole token.
+# Least privilege: the default token can be read/write.
 permissions:
   contents: read
 
 concurrency:
-  group: lint-${{ github.ref }}
+  group: ${{ github.workflow == 'lint' && format('lint-{0}', github.ref) || format('lint-called-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:

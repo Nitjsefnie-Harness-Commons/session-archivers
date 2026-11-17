@@ -139,6 +139,12 @@ jobs:
           SESSION_ARCHIVERS_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 .github/scripts/gate_base_freshness.py
 
+      - name: Refuse a workflow-name scope outside the ci type
+        if: github.event_name == 'pull_request'
+        env:
+          SESSION_ARCHIVERS_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 .github/scripts/commit_scopes.py
+
       - name: Fold the leg results into one verdict
         env:
           SESSION_ARCHIVERS_NEEDS_JSON: ${{ toJSON(needs) }}

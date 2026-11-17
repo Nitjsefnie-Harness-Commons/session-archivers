@@ -136,6 +136,10 @@ pip-audit -r requirements-dev.txt -r requirements-test.txt       # audit
 actionlint .github/workflows/*.yml && zizmor .github/workflows/  # workflows
 ```
 
+The workflow lint needs the actionlint build the `actionlint` workflow
+installs, Nitjsefnie-OSC/actionlint v1.7.12-queue.1: stock 1.7.12 rejects
+the `queue: max` key in `claim.yml`.
+
 `pip install -r requirements-dev.txt -r requirements-test.txt` gets the
 pinned toolchain. Use `-co --exclude-standard`, not a bare `git ls-files`:
 a brand-new module is untracked until you stage it, and pylint would
@@ -184,6 +188,11 @@ branches that need an unwritable filesystem to reach.
 | `codeql` | Security analysis (Python only — no JS here). Findings go to the Security tab, never the build. Weekly cron on top of push, because a query published today would otherwise only ever run against files touched after it shipped. |
 | `audit` | `pip-audit` over both requirements files, resolving the full transitive tree. **Daily** cron: this answers "is a version we froze months ago still safe", and that answer changes with no commit here to hang it on. |
 | `actionlint` | `actionlint` + `zizmor` over the workflow YAML. A broken workflow does not go red, it silently stops running. |
+| `pr gate` | `Nitjsefnie-Actions/pr-gate`: the pull-request description against `.github/PULL_REQUEST_TEMPLATE.md`, every issue it closes assigned to its author, Conventional Commits subjects, and every commit's author and committer attributable to the pull-request author. |
+| `claim` | `Nitjsefnie-Actions/claim`: `/claim`, `/unclaim` and `/release` on an issue assign and unassign the commenter. |
+| `pin test screen` | `Nitjsefnie-Actions/pin-guard`: comments on test lines that assert a pinned dependency version, tag, SHA or digest. |
+| `comment share` | `Nitjsefnie-Actions/comment-ratchet`: a pull request may not raise a tracked file's comment share above 15%, or above its record in `.github/comment-share.json`. |
+| `size baseline` | `Nitjsefnie-Actions/size-ratchet`: per-file line ceilings and the `tests/` line total, recorded in `.github/size-baseline.json`. |
 | `tag` | Watches `session_archivers/__init__.py`. When `__version__` changes on `main`, it waits for every other check on that commit and then pushes `v<version>`. |
 | `release` | Fires on that tag: runs every suite, builds the wheel, and publishes `SHA256SUMS` beside it. |
 
@@ -207,3 +216,12 @@ they are simply never named back. A new file of an unlisted type is
 invisible to git and will NOT appear in `git status`;
 `git check-ignore -v <path>` names the rule hiding it. Never "fix" it by
 loosening the leading `*`.
+
+**The comment-share and size records** are kept by their actions, and they
+never rise. With the deploy key of the `main-push` environment, each push to
+`main` tightens `.github/comment-share.json` and `.github/size-baseline.json`
+and commits any change itself. The adoption pull request seeded
+`.github/comment-share.json` by running the action's tighten over its own
+head (`COMMENT_RATCHET_MODE=tighten GITHUB_WORKSPACE="$PWD" python3 -I
+<comment-ratchet checkout>/run.py`); the first push to `main` seeds the size
+records.

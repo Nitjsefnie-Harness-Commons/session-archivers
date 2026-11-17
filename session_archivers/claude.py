@@ -38,7 +38,10 @@ Flags:
   --days N    retention threshold for the delete gate (default 3)
   --dry-run   preview every action; no R2 puts, no local removals
 
-Exit code: 0 on success, 1 if any upload failed.
+A bucket that cannot be listed is logged and skipped; the run goes on.
+
+Exit code: 0 on success, 1 if any upload failed or a session routes to a
+bucket that could not be listed.
 '''
 
 import argparse
@@ -216,7 +219,7 @@ def cleanup_local(cutoff, dry_run, log):
 
 
 def archive_projects(dest, zai_dest, cutoff, llama_dest=None,
-                     openrouter_dest=None):
+                     openrouter_dest=None, unreachable=()):
     '''Upload every project, delete what is past the retention gate.
 
     Each session files under the bucket of EVERY model family its transcript
@@ -225,6 +228,8 @@ def archive_projects(dest, zai_dest, cutoff, llama_dest=None,
     OpenRouter's Anthropic-compatible endpoint (each falling back to `dest`
     when no store is given, the pre-1.3 / pre-1.5 call shapes). A session
     naming no known family is not archived at all: logged and left in place.
+    A store in `unreachable` gets nothing; a session routed to one still goes
+    to its other buckets, counts one failure and is never deleted.
     Returns (uploaded, deleted, failed, skipped_unknown) summed over every
     bucket.
     '''
@@ -236,7 +241,10 @@ def archive_projects(dest, zai_dest, cutoff, llama_dest=None,
               provider.OPENROUTER: openrouter_dest or dest}
 
     def targets_for(families):
-        return [routes.get(family, dest) for family in sorted(families)]
+        '''(reachable routes for `families`, whether that is all of them)'''
+        targets = [routes.get(family, dest) for family in sorted(families)]
+        reachable = [route for route in targets if route not in unreachable]
+        return reachable, len(reachable) == len(targets)
 
     for project_dir in PROJECTS_DIR.iterdir():
         if not project_dir.is_dir():
@@ -258,7 +266,8 @@ def archive_projects(dest, zai_dest, cutoff, llama_dest=None,
             if unknowns:
                 dest.log(f'unknown model ids in {jsonl}: '
                          f'{", ".join(sorted(unknowns))}')
-            targets = targets_for(families)
+            targets, complete = targets_for(families)
+            n_failed += not complete
 
             ok = True
             for route in targets:
@@ -284,7 +293,7 @@ def archive_projects(dest, zai_dest, cutoff, llama_dest=None,
                         n_failed += 1
                         ok = False
 
-            if not ok or not runtime.is_old(jsonl, cutoff):
+            if not ok or not complete or not runtime.is_old(jsonl, cutoff):
                 continue
 
             # Every route the session went to must hold every object.
@@ -324,7 +333,8 @@ def archive_projects(dest, zai_dest, cutoff, llama_dest=None,
                 dest.log(f'unknown model ids in {sub}: '
                          f'{", ".join(sorted(unknowns))}')
             ok = True
-            targets = targets_for(families)
+            targets, complete = targets_for(families)
+            n_failed += not complete
             for route in targets:
                 try:
                     n_uploaded += route.upload_dir(sub,
@@ -333,7 +343,7 @@ def archive_projects(dest, zai_dest, cutoff, llama_dest=None,
                     route.log(f'upload failed: orphan uuid_dir={sub} err={e}')
                     n_failed += 1
                     ok = False
-            if not ok or not runtime.is_old(sub, cutoff):
+            if not ok or not complete or not runtime.is_old(sub, cutoff):
                 continue
             if not all(route.holds_dir(sub, f'{project}/{sub.name}/data')
                        for route in targets):
@@ -378,18 +388,25 @@ def main():
         openrouter_dest = store.Store(client, OPENROUTER_BUCKET, log,
                                       args.dry_run)
         stores = (dest, zai_dest, llama_dest, openrouter_dest)
+        unreachable = set()
         for each in stores:
-            log(f'remote inventory: {len(each.inventory()):,} objects '
-                f'in bucket {each.bucket!r}')
+            try:
+                log(f'remote inventory: {len(each.inventory()):,} objects '
+                    f'in bucket {each.bucket!r}')
+            except Exception as e:  # pylint: disable=broad-except
+                log(f'bucket {each.bucket!r} unreachable: '
+                    f'{type(e).__name__}: {e}')
+                unreachable.add(each)
+                continue
             log(f'manifest {store.manifest_key()}: '
                 f'{len(each.load_manifest()):,} known stored objects')
 
         n_up, n_del, n_fail, n_skip = archive_projects(
             dest, zai_dest, cutoff, llama_dest=llama_dest,
-            openrouter_dest=openrouter_dest)
+            openrouter_dest=openrouter_dest, unreachable=unreachable)
 
         if not args.dry_run:
-            for each in stores:
+            for each in (s for s in stores if s not in unreachable):
                 try:
                     each.save_manifest()
                 except Exception as e:  # pylint: disable=broad-except

@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 
 import _util
+from botocore.exceptions import ClientError
 
 _CLAUDE = _util.load_package_module("claude")
 _CODEX = _util.load_package_module("codex")
@@ -45,11 +46,12 @@ class RoutingS3:  # pylint: disable=too-few-public-methods
     bucket — so its main() tests hand the stub a routing table instead of a
     single bucket. A call naming a bucket no stub owns fails here rather
     than passing quietly, which is what lets a test catch a misrouted
-    upload.
+    upload. Listing a bucket in `refused` raises R2's missing-bucket error.
     """
 
-    def __init__(self, *fakes):
+    def __init__(self, *fakes, refused=()):
         self.by_bucket = {fake.bucket: fake for fake in fakes}
+        self.refused = refused
 
     def _pick(self, bucket):
         fake = self.by_bucket.get(bucket)
@@ -72,6 +74,9 @@ class RoutingS3:  # pylint: disable=too-few-public-methods
         class _Page:
             def paginate(self, **kwargs):
                 fake = outer._pick(kwargs["Bucket"])
+                if fake.bucket in outer.refused:
+                    raise ClientError({"Error": {"Code": "NoSuchBucket"}},
+                                      "ListObjectsV2")
                 yield from fake.get_paginator(real).paginate(**kwargs)
 
         return _Page()
@@ -171,7 +176,7 @@ def _legacy_walk(tmp, dest, cutoff):
 
 
 def _run_main(mod, tmp, argv, client, zai_client=None, llama_client=None,
-              openrouter_client=None, **attrs):
+              openrouter_client=None, refused=(), **attrs):
     """Drive an archiver's main() with the stub client and a sandboxed tree.
 
     `zai_client` / `llama_client` / `openrouter_client` are for the claude
@@ -179,7 +184,7 @@ def _run_main(mod, tmp, argv, client, zai_client=None, llama_client=None,
     The stub becomes a router and ZAI_BUCKET / LLAMA_BUCKET / OPENROUTER_BUCKET
     are sandboxed to the stubs' own bucket names; a llama and an openrouter
     stub are made when only a zai one is given, so the router owns every
-    bucket main() opens.
+    bucket main() opens; the router refuses to list the buckets `refused` names.
     """
     saved_argv = sys.argv
     saved_client = _STORE.client
@@ -205,7 +210,7 @@ def _run_main(mod, tmp, argv, client, zai_client=None, llama_client=None,
         sys.argv = argv
         if zai_client is not None:
             router = RoutingS3(client, zai_client, llama_client,
-                               openrouter_client)
+                               openrouter_client, refused=refused)
             _STORE.client = lambda: router
         else:
             _STORE.client = lambda: client
@@ -299,18 +304,12 @@ def test_claude_deletes_a_stale_orphan_dir(tmp):
     assert not any(_KEPT in line for line in said), said
 
 
-def test_claude_never_archives_the_memory_and_tasks_directories(tmp):
-    """They are working state, not session history, and memory/ is private."""
+def test_claude_never_archives_memory_tasks_or_a_loose_file_in_projects(tmp):
+    """memory/ and tasks/ are working state, not session history, and memory/
+    is private; a loose file where a project should be is no project."""
     projects = Path(tmp) / "projects"
     _write(projects / "p" / "memory" / "note.md", "private")
     _write(projects / "p" / "tasks" / "t.output", "scratch")
-    dest, zai, client, zai_client, _ = _dests()
-    assert _claude_walk(tmp, dest, zai, _cutoff(1)) == (0, 0, 0, 0)
-    assert client.objects == {} and zai_client.objects == {}
-
-
-def test_claude_ignores_a_loose_file_where_a_project_should_be(tmp):
-    projects = Path(tmp) / "projects"
     _write(projects / "stray.txt", "not a project")
     dest, zai, client, zai_client, _ = _dests()
     assert _claude_walk(tmp, dest, zai, _cutoff(1)) == (0, 0, 0, 0)
@@ -390,16 +389,19 @@ def test_claude_counts_a_failed_orphan_upload_and_keeps_the_dir(tmp):
 
 
 def test_claude_keeps_a_session_a_route_left_unverified(tmp):
-    """The zai upload of one key silently does nothing: no exception, no
+    """One route's upload of one key silently does nothing: no exception, no
     failure counted, so only the gate can keep the session, and every route
-    the session went to (claude too, when multi-family) must hold it all."""
+    the session went to must hold it all: zai, the last in route order, and
+    claude, the first, when multi-family."""
     glm, multi = ("glm-5.3-flash",), ("claude-opus-5", "glm-5.3-flash")
-    for label, models, skip in (
-            ("transcript", glm, "p/u/u.jsonl"), ("data", glm, "p/u/data/out.txt"),
-            ("multi transcript", multi, "p/u/u.jsonl"),
-            ("multi data", multi, "p/u/data/out.txt"),
-            ("orphan", glm, "p/u/data/out.txt"),
-            ("multi orphan", multi, "p/u/data/out.txt")):
+    for label, models, skipper, skip in (
+            ("transcript", glm, _ZAI_BUCKET, "p/u/u.jsonl"),
+            ("data", glm, _ZAI_BUCKET, "p/u/data/out.txt"),
+            ("multi transcript", multi, _ZAI_BUCKET, "p/u/u.jsonl"),
+            ("multi data", multi, _ZAI_BUCKET, "p/u/data/out.txt"),
+            ("multi, first route", multi, _BUCKET, "p/u/u.jsonl"),
+            ("orphan", glm, _ZAI_BUCKET, "p/u/data/out.txt"),
+            ("multi orphan", multi, _ZAI_BUCKET, "p/u/data/out.txt")):
         home = Path(tmp) / label
         session = home / "projects" / "p" / "u"
         if "orphan" in label:
@@ -412,15 +414,16 @@ def test_claude_keeps_a_session_a_route_left_unverified(tmp):
         local.append(_write(session / "out.txt", "{}"))
         if "orphan" in label:
             _age(session, 10)
-        client, zai_client, said = (_util.FakeS3(_BUCKET),
-                                    _util.FakeS3(_ZAI_BUCKET), [])
-        zai = _SkippingStore(zai_client, _ZAI_BUCKET, said.append, skip=(skip,))
-        assert _claude_walk(home, _STORE.Store(client, _BUCKET, said.append), zai,
+        said, fakes = [], (_util.FakeS3(_BUCKET), _util.FakeS3(_ZAI_BUCKET))
+        dest, zai = (_SkippingStore(fake, fake.bucket, said.append,
+                                    skip=[skip] * (fake.bucket == skipper))
+                     for fake in fakes)
+        assert _claude_walk(home, dest, zai,
                             _cutoff()) == (len(models) * 2 - 1, 0, 0, 0), label
-        assert zai.skipped == [skip], label
-        assert set(zai_client.objects) == {k + ".xz" for k in keys if k != skip}, label
-        assert set(client.objects) == ({k + ".xz" for k in keys}
-                                       if len(models) > 1 else set()), label
+        assert dest.skipped + zai.skipped == [skip], label
+        for fake, routed in zip(fakes, (len(models) > 1, True)):
+            held = {k + ".xz" for k in keys if (fake.bucket, k) != (skipper, skip)}
+            assert set(fake.objects) == (held if routed else set()), label
         assert all(path.exists() for path in local), label
         assert any(_KEPT in line and str(kept) in line for line in said), label
 
@@ -485,27 +488,19 @@ def test_claude_main_uses_the_bucket_its_own_setting_names(tmp):
     assert "p/s/s.jsonl.xz" in client.objects
 
 
-def test_claude_main_returns_one_when_an_upload_failed(tmp):
-    """The exit code is what cron reports; a silent 0 hides data loss."""
-    projects = Path(tmp) / "projects"
-    _write(projects / "p" / "s2.jsonl", _session_body(_claude_entries()))
-    client = _util.FakeS3(_BUCKET)
-    client.fail_puts.add("p/s2/s2.jsonl.xz")
-    code, out = _claude_main(tmp, [], client)
-    assert code == 1
-    assert "failures=1" in out
-
-
-def test_claude_main_logs_a_failed_manifest_save_without_failing_the_run(tmp):
-    """The transcripts are already in the bucket; only the next run pays."""
-    projects = Path(tmp) / "projects"
-    _write(projects / "p" / "s4.jsonl", _session_body(_claude_entries()))
-    client = _util.FakeS3(_BUCKET)
-    client.fail_puts.add(_STORE.manifest_key())
-    code, out = _claude_main(tmp, [], client)
-    assert code == 0
-    assert "manifest save failed" in out
-    assert "p/s4/s4.jsonl.xz" in client.objects
+def test_claude_main_fails_the_run_on_a_failed_upload_not_a_manifest_save(tmp):
+    """The exit code is what cron reports; a silent 0 hides data loss. A
+    failed manifest save loses nothing (the transcripts are already in the
+    bucket; only the next run pays), so it is logged and the run exits 0."""
+    for refused, code, said in (("p/s/s.jsonl.xz", 1, "failures=1"),
+                                (_STORE.manifest_key(), 0, "manifest save failed")):
+        home = Path(tmp) / str(code)
+        _write(home / "projects" / "p" / "s.jsonl", _session_body(_claude_entries()))
+        client = _util.FakeS3(_BUCKET)
+        client.fail_puts.add(refused)
+        run = _claude_main(home, [], client)
+        assert run[0] == code and said in run[1], (refused, run)
+        assert ("p/s/s.jsonl.xz" in client.objects) == (code == 0), refused
 
 
 def test_claude_main_dry_run_writes_nothing_to_the_bucket(tmp):
@@ -660,17 +655,20 @@ def _llama_entries():
     ]
 
 
-def test_claude_files_a_glm_and_a_llama_transcript_into_their_buckets(tmp):
+def test_claude_files_glm_llama_and_openrouter_transcripts_into_their_buckets(tmp):
     projects = Path(tmp) / "projects"
     for uuid, entries in (("zz01-glm", _glm_entries()),
-                          ("zz05-llama", _llama_entries())):
+                          ("zz05-llama", _llama_entries()),
+                          ("oo00-openrouter", _openrouter_entries())):
         _write(projects / "p" / f"{uuid}.jsonl", _session_body(entries))
         _write(projects / "p" / uuid / "tasks.json", "{}")
     dest, zai, client, zai_client, said = _dests()
     llama, llama_client = _route(_LLAMA_BUCKET, said)
-    assert _claude_walk(tmp, dest, zai, _cutoff(1),
-                        llama_dest=llama) == (4, 0, 0, 0)
-    for uuid, bucket in (("zz01-glm", zai_client), ("zz05-llama", llama_client)):
+    openrouter, openrouter_client = _route(_OPENROUTER_BUCKET, said)
+    assert _claude_walk(tmp, dest, zai, _cutoff(1), llama_dest=llama,
+                        openrouter_dest=openrouter) == (6, 0, 0, 0)
+    for uuid, bucket in (("zz01-glm", zai_client), ("zz05-llama", llama_client),
+                         ("oo00-openrouter", openrouter_client)):
         assert sorted(bucket.objects) == [f"p/{uuid}/data/tasks.json.xz",
                                           f"p/{uuid}/{uuid}.jsonl.xz"], uuid
     assert client.objects == {}
@@ -687,22 +685,6 @@ def _openrouter_entries():
                      "id": "gen-1758000000-abc123",
                      "content": [{"type": "text", "text": "hello"}]}},
     ]
-
-
-def test_claude_files_an_openrouter_transcript_into_the_openrouter_bucket(tmp):
-    projects = Path(tmp) / "projects"
-    uuid = "oo00-openrouter"
-    jsonl = _write(projects / "p" / f"{uuid}.jsonl",
-                   _session_body(_openrouter_entries()), days_old=10)
-    data = _write(projects / "p" / uuid / "blob.json", "{}")
-    dest, zai, client, zai_client, said = _dests()
-    openrouter, openrouter_client = _route(_OPENROUTER_BUCKET, said)
-    assert _claude_walk(tmp, dest, zai, _cutoff(),
-                        openrouter_dest=openrouter) == (2, 1, 0, 0)
-    assert not jsonl.exists() and not data.parent.exists()
-    assert f"p/{uuid}/{uuid}.jsonl.xz" in openrouter_client.objects
-    assert f"p/{uuid}/data/blob.json.xz" in openrouter_client.objects
-    assert client.objects == {} and zai_client.objects == {}
 
 
 def test_claude_files_an_openrouter_and_claude_session_into_both_buckets(tmp):
@@ -890,25 +872,19 @@ def test_claude_rescans_a_session_that_shrank_below_its_cached_size(tmp):
     assert zai_client.objects == {}
 
 
-def test_claude_dry_run_writes_no_provider_cache(tmp):
-    projects = Path(tmp) / "projects"
-    _write(projects / "p" / "zz09-dry.jsonl", _session_body(_glm_entries()))
-    cache = Path(tmp) / "providers.json"
-    dest, zai, _, _, _ = _dests(dry_run=True)
-    assert _claude_walk(tmp, dest, zai, _cutoff(1)) == (1, 0, 0, 0)
-    assert not cache.exists()
-
-
-def test_claude_a_real_run_persists_the_provider_cache(tmp):
-    projects = Path(tmp) / "projects"
-    _write(projects / "p" / "zz10-real.jsonl", _session_body(_glm_entries()))
-    cache = Path(tmp) / "providers.json"
-    dest, zai, _, _, _ = _dests()
-    assert _claude_walk(tmp, dest, zai, _cutoff(1)) == (1, 0, 0, 0)
-    saved = json.loads(cache.read_text(encoding="utf-8"))
-    assert saved["format"] == 3
-    entry = saved["entries"]["p/zz10-real"]
-    assert entry[1] == ["zai"] and entry[2] == []
+def test_claude_persists_the_provider_cache_on_a_real_run_only(tmp):
+    for dry_run in (True, False):
+        home = Path(tmp) / str(dry_run)
+        _write(home / "projects" / "p" / "zz10.jsonl", _session_body(_glm_entries()))
+        cache = home / "providers.json"
+        dest, zai, _, _, _ = _dests(dry_run=dry_run)
+        assert _claude_walk(home, dest, zai, _cutoff(1)) == (1, 0, 0, 0)
+        if dry_run:
+            assert not cache.exists()
+            continue
+        saved = json.loads(cache.read_text(encoding="utf-8"))
+        assert saved["format"] == 3
+        assert saved["entries"]["p/zz10"][1:] == [["zai"], []]
 
 
 def test_claude_main_files_each_provider_into_its_own_bucket(tmp):
@@ -916,35 +892,54 @@ def test_claude_main_files_each_provider_into_its_own_bucket(tmp):
     _write(projects / "p" / "glm-session.jsonl", _session_body(_glm_entries()))
     _write(projects / "p" / "cc-session.jsonl", _session_body(_claude_entries()))
     _write(projects / "p" / "gguf-session.jsonl", _session_body(_llama_entries()))
-    client = _util.FakeS3(_BUCKET)
-    zai_client = _util.FakeS3(_ZAI_BUCKET)
-    llama_client = _util.FakeS3(_LLAMA_BUCKET)
+    _write(projects / "p" / "or-session.jsonl", _session_body(_openrouter_entries()))
+    client, zai_client, llama_client, openrouter_client = (
+        _util.FakeS3(bucket) for bucket in (_BUCKET, _ZAI_BUCKET, _LLAMA_BUCKET,
+                                            _OPENROUTER_BUCKET))
     code, out = _claude_main(tmp, ["--days", "3"], client, zai_client=zai_client,
-                             llama_client=llama_client)
+                             llama_client=llama_client,
+                             openrouter_client=openrouter_client)
     assert code == 0
     assert "p/glm-session/glm-session.jsonl.xz" in zai_client.objects
     assert "p/cc-session/cc-session.jsonl.xz" in client.objects
-    assert "p/gguf-session/gguf-session.jsonl.xz" in llama_client.objects
-    assert "p/gguf-session/gguf-session.jsonl.xz" not in client.objects
-    for each in (client, zai_client, llama_client):
+    for uuid, bucket in (("gguf-session", llama_client),
+                         ("or-session", openrouter_client)):
+        assert f"p/{uuid}/{uuid}.jsonl.xz" in bucket.objects
+        assert f"p/{uuid}/{uuid}.jsonl.xz" not in client.objects
+    for each in (client, zai_client, llama_client, openrouter_client):
         assert _STORE.manifest_key() in each.objects
-    assert "done — uploaded=3 deleted=0 failures=0 skipped_unknown=0" in out
+    assert "done — uploaded=4 deleted=0 failures=0 skipped_unknown=0" in out
 
 
-def test_claude_main_files_an_openrouter_session_into_its_own_bucket(tmp):
-    projects = Path(tmp) / "projects"
-    _write(projects / "p" / "or-session.jsonl",
-           _session_body(_openrouter_entries()))
-    client = _util.FakeS3(_BUCKET)
-    openrouter_client = _util.FakeS3(_OPENROUTER_BUCKET)
-    code, out = _claude_main(tmp, ["--days", "3"], client,
-                             openrouter_client=openrouter_client)
-    assert code == 0
-    assert "p/or-session/or-session.jsonl.xz" in openrouter_client.objects
-    assert "p/or-session/or-session.jsonl.xz" not in client.objects
-    for each in (client, openrouter_client):
-        assert _STORE.manifest_key() in each.objects
-    assert "done — uploaded=1 deleted=0 failures=0 skipped_unknown=0" in out
+def test_claude_main_survives_a_bucket_it_cannot_list(tmp):
+    """A missing bucket is logged by name and sent nothing, manifest
+    included. Every session (a transcript, an orphan dir) still reaches every
+    bucket it can; each routed to missing buckets (two, here) counts ONE
+    failure and stays on disk, and a run no session routes there exits 0."""
+    models = ("claude-opus-5", "bonsai-2-27b", "deepseek/deepseek-v4.1-flash")
+    for routed, deleted, failures in ((models[:1], 2, 0), (models, 0, 2)):
+        home = Path(tmp) / str(len(routed))
+        jsonl = _write(home / "projects" / "p" / "u.jsonl", _session_for(*routed),
+                       days_old=10)
+        _write(home / "projects" / "p" / "u" / "blob.json", "{}")
+        orphan = home / "projects" / "p" / "o"
+        _write(orphan / "wire.jsonl", _session_for(*routed))
+        _age(orphan, 10)
+        client, *refused = (_util.FakeS3(bucket) for bucket in
+                            (_BUCKET, _LLAMA_BUCKET, _OPENROUTER_BUCKET))
+        code, out = _claude_main(home, [], client, llama_client=refused[0],
+                                 openrouter_client=refused[1],
+                                 refused=(_LLAMA_BUCKET, _OPENROUTER_BUCKET))
+        assert code == (1 if failures else 0), routed
+        assert set(client.objects) == {_STORE.manifest_key(), "p/u/u.jsonl.xz",
+                                       "p/u/data/blob.json.xz",
+                                       "p/o/data/wire.jsonl.xz"}, routed
+        assert [fake.puts for fake in refused] == [[], []], routed
+        assert jsonl.exists() == orphan.exists() == (not deleted), routed
+        for bucket in (_LLAMA_BUCKET, _OPENROUTER_BUCKET):
+            assert f"bucket {bucket!r} unreachable: ClientError" in out, routed
+        assert (f"done — uploaded=3 deleted={deleted} failures={failures} "
+                "skipped_unknown=0") in out, routed
 
 
 # --- codex ---------------------------------------------------------------------------

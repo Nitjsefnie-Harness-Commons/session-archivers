@@ -72,6 +72,11 @@ jobs:
       # cannot do that on its own.
       actions: write
 
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      # Written only after the tag push succeeded: `bump` keys on it.
+      pushed: ${{ steps.push.outputs.pushed }}
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -85,16 +90,26 @@ jobs:
         # file: pyproject.toml resolves the distribution version from this
         # same attribute, so reading it the same way is the only way to be
         # sure the tag and the wheel agree.
+        #
+        # A development version is what main carries between releases, so
+        # it ends the job green with every later step skipped.
         run: |
           version="$(python3 -c 'import session_archivers; print(session_archivers.__version__)')"
+          if echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]+$'; then
+            echo "Version is $version, a development version: not tagging or releasing it."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([._a-z0-9-]*)$'; then
             echo "__version__ is not a usable version: '$version'" >&2
             exit 1
           fi
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
           echo "Version is $version"
 
       - name: Refuse to re-tag an existing version
+        if: steps.version.outputs.release == 'true'
         id: free
         env:
           GH_TOKEN: ${{ github.token }}
@@ -120,7 +135,7 @@ jobs:
           echo "free=true" >> "$GITHUB_OUTPUT"
 
       - name: Wait for the other gates on this commit
-        if: steps.free.outputs.free == 'true'
+        if: steps.version.outputs.release == 'true' && steps.free.outputs.free == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ inputs.sha || github.sha }}
@@ -204,7 +219,8 @@ jobs:
           exit 1
 
       - name: Create and push the tag
-        if: steps.free.outputs.free == 'true'
+        if: steps.version.outputs.release == 'true' && steps.free.outputs.free == 'true'
+        id: push
         env:
           TAG: ${{ steps.version.outputs.tag }}
           SHA: ${{ inputs.sha || github.sha }}
@@ -215,6 +231,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" -m "$TAG" "$SHA"
           git push origin "$TAG"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
           echo "Pushed $TAG at $SHA."
           {
             echo "### Tagged \`$TAG\`"
@@ -223,7 +240,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Start the release
-        if: steps.free.outputs.free == 'true'
+        if: steps.version.outputs.release == 'true' && steps.free.outputs.free == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
@@ -242,3 +259,90 @@ jobs:
             echo "\`release.yml\` dispatched against \`$TAG\`; it builds"
             echo "and publishes the wheel and its checksums from there."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Moves main off the version just released, so no later commit claims
+  # the name of a published wheel. The commit it pushes carries a .dev0
+  # version, which the version step above never tags: no loop.
+  bump:
+    needs: tag
+    # Not on the tag job's success: a failed dispatch after the push still
+    # leaves a released version on main. GitHub evaluates job outputs at
+    # the end of every job.
+    if: ${{ !cancelled() && needs.tag.outputs.pushed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Holds the deploy key: a deploy key is the only bypass main's rules
+    # list for pushing without a pull request.
+    environment: main-push
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The tip of main now, not the tagged commit: main may have
+          # moved while the gates ran.
+          ref: main
+          persist-credentials: false
+
+      - name: Commit the next development version
+        env:
+          TAG: ${{ needs.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+          PUSH_KEY: ${{ secrets.MASTER_PUSH_DEPLOY_KEY }}
+        # Text edits and git only: nothing from the checkout runs beside
+        # the key, hooks included. The host key is pinned from GitHub's
+        # meta endpoint, as size-ratchet pins it: ssh-keyscan trusts any
+        # answer.
+        run: |
+          released="${TAG#v}"
+          if ! echo "$released" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tagged $TAG, which is not X.Y.Z, so there is no next" >&2
+            echo "patch version to open; set main's __version__ by hand." >&2
+            exit 1
+          fi
+          next="${released%.*}.$(( ${released##*.} + 1 )).dev0"
+          file=session_archivers/__init__.py
+          old="__version__ = \"$released\""
+          new="__version__ = \"$next\""
+          current="$(grep '^__version__ = ' "$file" || true)"
+          if [ "$current" != "$old" ]; then
+            echo "main no longer carries $old (it has: '$current');"
+            echo "someone moved the version after $TAG, so nothing to bump."
+            exit 0
+          fi
+
+          sed -i "s/^$old\$/$new/" "$file"
+          git -c core.hooksPath=/dev/null \
+            -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "chore(release): open $next after releasing $released" -- "$file"
+          if [ "$(git diff --numstat HEAD^ HEAD)" != "$(printf '1\t1\t%s' "$file")" ] \
+            || [ "$(git diff -U0 HEAD^ HEAD | grep -cxF -e "-$old" -e "+$new")" != 2 ]; then
+            echo "The bump commit changes more than the one version line:" >&2
+            git show --stat --patch HEAD >&2
+            exit 1
+          fi
+
+          if [ -z "$PUSH_KEY" ]; then
+            echo "MASTER_PUSH_DEPLOY_KEY is empty in this job; nothing pushed." >&2
+            exit 1
+          fi
+          ssh_dir="$(mktemp -d "$RUNNER_TEMP/bump.XXXXXX")"
+          trap 'rm -rf "$ssh_dir"' EXIT
+          (umask 077 && printf '%s\n' "$PUSH_KEY" > "$ssh_dir/key")
+          unset PUSH_KEY
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" \
+            > "$ssh_dir/known_hosts"
+          ssh="ssh -F /dev/null -i '$ssh_dir/key' -o IdentitiesOnly=yes"
+          ssh+=" -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes"
+          ssh+=" -o UserKnownHostsFile='$ssh_dir/known_hosts'"
+          if ! git -c core.hooksPath=/dev/null -c core.sshCommand="$ssh" \
+              push "git@github.com:$REPO.git" HEAD:refs/heads/main; then
+            echo "The push of $next to main was refused (git's reason above)." >&2
+            echo "If main moved after this job checked it out, re-run this" >&2
+            echo "failed job: it checks out the new tip and bumps again, or" >&2
+            echo "finds the version already moved and stops." >&2
+            exit 1
+          fi
+          echo "Pushed $next to main after releasing $released."

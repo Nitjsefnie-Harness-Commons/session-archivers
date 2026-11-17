@@ -66,35 +66,35 @@ jobs:
   tests:
     needs: classify
     if: needs.classify.outputs.docs_only != 'true'
-    uses: ./.github/workflows/tests.yml
+    uses: $/.github/workflows/tests.yml
     permissions:
       contents: read
 
   lint:
     needs: classify
     if: needs.classify.outputs.docs_only != 'true'
-    uses: ./.github/workflows/lint.yml
+    uses: $/.github/workflows/lint.yml
     permissions:
       contents: read
 
   types:
     needs: classify
     if: needs.classify.outputs.docs_only != 'true'
-    uses: ./.github/workflows/types.yml
+    uses: $/.github/workflows/types.yml
     permissions:
       contents: read
 
   audit:
     needs: classify
     if: needs.classify.outputs.docs_only != 'true'
-    uses: ./.github/workflows/audit.yml
+    uses: $/.github/workflows/audit.yml
     permissions:
       contents: read
 
   codeql:
     needs: classify
     if: needs.classify.outputs.docs_only != 'true'
-    uses: ./.github/workflows/codeql.yml
+    uses: $/.github/workflows/codeql.yml
     permissions:
       security-events: write
       actions: read
@@ -103,7 +103,7 @@ jobs:
   actionlint:
     needs: classify
     if: needs.classify.outputs.docs_only != 'true'
-    uses: ./.github/workflows/actionlint.yml
+    uses: $/.github/workflows/actionlint.yml
     permissions:
       contents: read
 

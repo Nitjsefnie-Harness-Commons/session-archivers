@@ -249,9 +249,9 @@ jobs:
         # is what fires for a tag a HUMAN pushes. It does not fire for the
         # tag the step above just pushed, because that push was
         # authenticated with GITHUB_TOKEN. Dispatching is the documented
-        # way through, and it composes safely with the push trigger:
-        # release.yml replaces the assets on a release that already exists
-        # rather than failing, so firing twice is not a problem.
+        # way through. The dispatch leaves `replace` false, so if release.yml
+        # runs twice for one tag, the later run finds the release's assets
+        # and stops red with a message instead of replacing them.
         run: |
           gh workflow run release.yml --repo "$REPO" --ref "$TAG"
           echo "Dispatched release.yml against $TAG."

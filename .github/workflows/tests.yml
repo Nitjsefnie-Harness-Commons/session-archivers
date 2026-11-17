@@ -103,7 +103,7 @@ jobs:
   coverage:
     # A JOB of its own, not steps inside the matrix above: the matrix is
     # 3 OSes x 4 Pythons, and coverage of the same code twelve times over
-    # tells you the same number twelve times. One run, on the newest Python
+    # tells you the same number twelve times. One run, on one Python
     # and the cheapest runner.
     runs-on: ubuntu-latest
     timeout-minutes: 20

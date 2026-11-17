@@ -67,11 +67,15 @@ jobs:
         run: python run_tests.py
 
       - name: Build the wheel
-        # The zip entries' timestamps come from SOURCE_DATE_EPOCH, set to
-        # the tagged commit's own time, and pyproject.toml pins the
-        # backend: a rebuild from the tag then reproduces the published
-        # hash instead of one that differs only in file dates.
+        # The wheel records each file's date and permission bits. The dates
+        # come from SOURCE_DATE_EPOCH, the tagged commit's own time; the
+        # bits are set to git's (644, 755 if executable) whatever umask
+        # made the checkout or runs the build; pyproject.toml pins the
+        # backend. So these commands, run on a checkout of the tag with
+        # Python 3.13, reproduce the published hash.
         run: |
+          umask 022
+          git ls-files -z | xargs -0 chmod a+rX,go-w
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
           export SOURCE_DATE_EPOCH
           python -m build --wheel
@@ -124,6 +128,56 @@ jobs:
         working-directory: dist
         run: sha256sum -c SHA256SUMS
 
+      - name: Decide how to publish, or refuse
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPLACE: ${{ inputs.replace }}
+        # Every refusal fires here, before the attestation below records a
+        # wheel this run would then not publish.
+        #
+        # A release with assets is refused unless `replace` is set: assets
+        # once published are what consumers already verified. A published
+        # immutable release takes no new or replaced asset and its tag can
+        # never be reused, so it is refused outright. `gh release create`
+        # drafts, uploads, then publishes, so an interrupted create leaves a
+        # draft, which gets its assets and is then published.
+        run: |
+          error="$RUNNER_TEMP/release-view.err"
+          if ! found="$(gh release view "$TAG" \
+              --json isDraft,isImmutable,assets \
+              --jq '"\(.isDraft) \(.isImmutable) \(.assets | length)"' 2>"$error")"; then
+            if [ "$(cat "$error")" != "release not found" ]; then
+              echo "Could not read release $TAG:" >&2
+              cat "$error" >&2
+              exit 1
+            fi
+            echo "action=create" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          read -r draft immutable assets <<< "$found"
+          if [ "$assets" != 0 ] && [ "$REPLACE" != true ]; then
+            echo "Release $TAG already has $assets asset(s); not replacing them." >&2
+            echo "Dispatch release.yml against $TAG with replace: true to" >&2
+            echo "replace them; a published immutable release refuses even that." >&2
+            exit 1
+          fi
+          if [ "$draft" = false ] && [ "$immutable" = true ]; then
+            echo "Release $TAG is published and immutable: GitHub takes no new" >&2
+            echo "or replaced asset on it, and its tag cannot be reused." >&2
+            echo "Release the next version instead." >&2
+            exit 1
+          fi
+          if [ "$assets" = 0 ]; then
+            echo "action=upload" >> "$GITHUB_OUTPUT"
+          else
+            echo "action=clobber" >> "$GITHUB_OUTPUT"
+          fi
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
+
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*.whl
@@ -133,44 +187,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.tag.outputs.tag }}
-          REPLACE: ${{ inputs.replace }}
+          ACTION: ${{ steps.plan.outputs.action }}
+          DRAFT: ${{ steps.plan.outputs.draft }}
         # `gh`, not a third-party action: it is preinstalled and maintained
         # by GitHub, and this job holds contents: write.
-        #
-        # A release with assets is refused unless `replace` is set: assets
-        # once published are what consumers already verified, and a
-        # published immutable release refuses the upload anyway. `gh release
-        # create` drafts, uploads, then publishes, so an interrupted create
-        # leaves a draft, which is published once its assets are in.
         run: |
-          error="$RUNNER_TEMP/release-view.err"
-          if ! found="$(gh release view "$TAG" \
-              --json isDraft,assets \
-              --jq '"\(.isDraft) \(.assets | length)"' 2>"$error")"; then
-            if [ "$(cat "$error")" != "release not found" ]; then
-              echo "Could not read release $TAG:" >&2
-              cat "$error" >&2
-              exit 1
-            fi
-            gh release create "$TAG" --title "$TAG" --generate-notes \
-              dist/*.whl dist/SHA256SUMS
-            echo "Published $TAG."
-            exit 0
-          fi
-
-          read -r draft assets <<< "$found"
-          if [ "$assets" = 0 ]; then
-            gh release upload "$TAG" dist/*.whl dist/SHA256SUMS
-          elif [ "$REPLACE" = true ]; then
-            echo "Release $TAG has $assets asset(s); replacing them, as asked."
-            gh release upload "$TAG" dist/*.whl dist/SHA256SUMS --clobber
-          else
-            echo "Release $TAG already has $assets asset(s); not replacing them." >&2
-            echo "Dispatch release.yml against $TAG with replace: true to" >&2
-            echo "replace them; a published immutable release refuses even that." >&2
-            exit 1
-          fi
-          if [ "$draft" = true ]; then
+          case "$ACTION" in
+            create)
+              gh release create "$TAG" --title "$TAG" --generate-notes \
+                dist/*.whl dist/SHA256SUMS ;;
+            upload) gh release upload "$TAG" dist/*.whl dist/SHA256SUMS ;;
+            clobber)
+              echo "Release $TAG has assets; replacing them, as asked."
+              gh release upload "$TAG" dist/*.whl dist/SHA256SUMS --clobber ;;
+            *)
+              echo "No publishing action decided for $TAG ('$ACTION')." >&2
+              exit 1 ;;
+          esac
+          if [ "$DRAFT" = true ]; then
             gh release edit "$TAG" --draft=false
           fi
           echo "Published $TAG."

@@ -5,6 +5,13 @@
 # workflow run: block is invisible to Dependabot. zizmor ships as a
 # self-contained binary wheel with no dependencies, so the hashes cover the
 # whole install: one per distribution of the release.
+#
+# Dependabot rewrites one pinned line per bump and never adds a new
+# transitive dependency, so a bump that adds or tightens one is regenerated
+# with this command, run from the repository root, its output replacing every
+# pin below. It reads the top-level pins from this file, so a bumped pin
+# stays bumped:
+#   grep -E '^zizmor==' requirements-zizmor.txt | cut -d' ' -f1 | uv pip compile --generate-hashes --universal --python-version 3.11 --no-header -
 zizmor==1.29.0 \
     --hash=sha256:061600f23c46f2e400bcdef666c236de7e5c0b07dd6ca046daa001eb1514b909 \
     --hash=sha256:0fb85948ba5ffc7a8116eee36fe9cfc10167225c97bd2810e3378e66a9fd27c4 \

@@ -148,9 +148,12 @@ jobs:
         #     it cannot tag before CI is scheduled, nor on a skipped gate.
         #     A matrix gate's runs are named `<job> (<legs>)`. actionlint
         #     is absent: its push trigger covers workflow files only;
-        #   - every other run must end success, skipped or neutral, and it
-        #     waits for every pending run. `cancelled` counts as failure: a
-        #     cancelled run means a newer push superseded this SHA;
+        #   - every other run must end success, skipped or neutral.
+        #     `cancelled` counts as failure: a cancelled run means a newer
+        #     push superseded this SHA;
+        #   - it refuses as soon as any completed run, required or not,
+        #     breaks its rule above, and waits for pending runs only while
+        #     none has;
         #   - a required gate still unreported at the deadline is named.
         run: |
           required=(pycodestyle pylint pyright pip-audit analyze suites wheel coverage)
@@ -190,6 +193,11 @@ jobs:
               if [ -z "${seen[$gate]:-}" ]; then missing+=" $gate"; fi
             done
 
+            if [ -n "$bad" ]; then
+              echo "Refusing to tag: these checks did not pass:" >&2
+              printf '%s' "$bad" >&2
+              exit 1
+            fi
             if [ -n "$missing" ] || [ -n "$pending" ]; then
               if [ -n "$missing" ]; then
                 echo "required gate(s) not reported yet:$missing"
@@ -204,11 +212,6 @@ jobs:
 
             echo "All checks completed:"
             printf '%s' "$judged"
-            if [ -n "$bad" ]; then
-              echo "Refusing to tag: these checks did not pass:" >&2
-              printf '%s' "$bad" >&2
-              exit 1
-            fi
             echo "Every check passed — proceeding."
             exit 0
           done
@@ -266,8 +269,10 @@ jobs:
   bump:
     needs: tag
     # Not on the tag job's success: a failed dispatch after the push still
-    # leaves a released version on main. GitHub evaluates job outputs at
-    # the end of every job.
+    # leaves a released version on main. GitHub's docs do not say whether
+    # a failed job's outputs reach its dependents; if not, `pushed` reads
+    # empty, this job is skipped as under success(), and main keeps the
+    # released version until someone bumps it.
     if: ${{ !cancelled() && needs.tag.outputs.pushed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -291,9 +296,9 @@ jobs:
           REPO: ${{ github.repository }}
           PUSH_KEY: ${{ secrets.MASTER_PUSH_DEPLOY_KEY }}
         # Text edits and git only: nothing from the checkout runs beside
-        # the key, hooks included. The host key is pinned from GitHub's
-        # meta endpoint, as size-ratchet pins it: ssh-keyscan trusts any
-        # answer.
+        # the key, hooks included. The host key is GitHub's ed25519 key
+        # from its meta endpoint, one of the three size-ratchet pins:
+        # ssh-keyscan trusts any answer.
         run: |
           released="${TAG#v}"
           if ! echo "$released" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -305,10 +310,18 @@ jobs:
           file=session_archivers/__init__.py
           old="__version__ = \"$released\""
           new="__version__ = \"$next\""
-          current="$(grep '^__version__ = ' "$file" || true)"
-          if [ "$current" != "$old" ]; then
-            echo "main no longer carries $old (it has: '$current');"
-            echo "someone moved the version after $TAG, so nothing to bump."
+          current="$(grep '^__version__' "$file" || true)"
+          version="$(printf '%s\n' "$current" \
+            | sed -nE 's/^__version__ = "([0-9A-Za-z.+-]+)"$/\1/p')"
+          if [ -z "$version" ] || [ "$(printf '%s\n' "$current" | wc -l)" != 1 ]; then
+            echo "Cannot read main's version: $file should have exactly one" >&2
+            echo "line __version__ = \"X.Y.Z...\", but has: '$current'." >&2
+            echo "Fix that line, then re-run this job." >&2
+            exit 1
+          fi
+          if [ "$version" != "$released" ]; then
+            echo "main carries $version, not $released: someone"
+            echo "moved the version after $TAG, so nothing to bump."
             exit 0
           fi
 

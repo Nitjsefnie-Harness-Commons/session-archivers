@@ -208,12 +208,6 @@ def _skip_line(path, unknowns):
     return f'skipped unknown-model session: {path}: {ids}'
 
 
-def _keep_unverified(dest, path):
-    '''Log why a stale path stays: a bucket it went to does not verifiably
-    hold all of it.'''
-    dest.log(f'  kept, not verified in the bucket: {path}')
-
-
 def cleanup_local(cutoff, dry_run, log):
     '''Delete ~/.claude/{debug/*, file-history/*/, telemetry/*} past `cutoff`.'''
     runtime.sweep_files(DEBUG_DIR, cutoff, dry_run, log)
@@ -298,7 +292,7 @@ def archive_projects(dest, zai_dest, cutoff, llama_dest=None,
                        and (not uuid_dir.is_dir()
                             or route.holds_dir(uuid_dir, f'{r2_prefix}/data'))
                        for route in targets):
-                _keep_unverified(dest, jsonl)
+                runtime.log_kept_unverified(dest.log, jsonl)
                 continue
 
             if dest.dry_run:
@@ -343,7 +337,7 @@ def archive_projects(dest, zai_dest, cutoff, llama_dest=None,
                 continue
             if not all(route.holds_dir(sub, f'{project}/{sub.name}/data')
                        for route in targets):
-                _keep_unverified(dest, sub)
+                runtime.log_kept_unverified(dest.log, sub)
                 continue
             if dest.dry_run:
                 dest.log(f'  DRY rmtree {sub}')

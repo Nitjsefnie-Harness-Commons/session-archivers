@@ -230,13 +230,14 @@ def test_claude_deletes_a_stale_transcript_and_its_data_dir(tmp):
     jsonl = _write(projects / "p" / f"{uuid}.jsonl",
                    _session_body(_claude_entries()), days_old=10)
     data = _write(projects / "p" / uuid / "blob.json", "{}")
-    dest, zai, client, _, _ = _dests()
+    dest, zai, client, _, said = _dests()
     with sandbox(_CLAUDE, PROJECTS_DIR=projects,
                  PROVIDER_CACHE=Path(tmp) / "providers.json"):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (2, 1, 0, 0)
     assert not jsonl.exists()
     assert not data.parent.exists()
     assert f"p/{uuid}/{uuid}.jsonl.xz" in client.objects
+    assert not any(_KEPT in line for line in said), said
 
 
 def test_claude_keeps_a_fresh_transcript(tmp):
@@ -286,11 +287,12 @@ def test_claude_deletes_a_stale_orphan_dir(tmp):
     _write(orphan / "wire.jsonl", _session_body(_claude_entries()))
     _write(orphan / "out.txt", "left behind")
     _age(orphan, 10)
-    dest, zai, _, _, _ = _dests()
+    dest, zai, _, _, said = _dests()
     with sandbox(_CLAUDE, PROJECTS_DIR=projects,
                  PROVIDER_CACHE=Path(tmp) / "providers.json"):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (2, 1, 0, 0)
     assert not orphan.exists()
+    assert not any(_KEPT in line for line in said), said
 
 
 def test_claude_dry_run_keeps_a_stale_orphan_dir(tmp):
@@ -1261,10 +1263,11 @@ def test_codex_deletes_a_stale_rollout_only_once_it_is_in_the_bucket(tmp):
     sessions = Path(tmp) / "sessions"
     path = _rollout(sessions, "21", "1-2-3-4-5",
                     {"session_id": "t", "cwd": "/proj"}, days_old=10)
-    dest, _, _ = _dest()
+    dest, _, said = _dest()
     with sandbox(_CODEX, SESSIONS_DIR=sessions):
         assert _CODEX.archive_rollouts(dest, _cutoff()) == (2, 1, 0, 0)
     assert not path.exists()
+    assert not any(_KEPT in line for line in said), said
 
 
 def _stored(dest, path, key):
@@ -1818,11 +1821,12 @@ def test_kimi_deletes_a_stale_legacy_session_and_prunes_the_hash_dir(tmp):
     sessions = kimi_dir / "sessions"
     uuid_dir = sessions / "hash1" / "uuid-1"
     _write(uuid_dir / "wire.jsonl", '{"a": 1}\n', days_old=10)
-    dest, _, _ = _dest()
+    dest, _, said = _dest()
     with sandbox(_KIMI, KIMI_DIR=kimi_dir, SESSIONS_DIR=sessions):
         assert _KIMI.archive_sessions(dest, _cutoff()) == (1, 1, 0)
     assert not uuid_dir.exists()
     assert not (sessions / "hash1").exists()
+    assert not any(_KEPT in line for line in said), said
 
 
 def test_kimi_legacy_dry_run_keeps_the_stale_session(tmp):
@@ -1882,8 +1886,8 @@ def test_kimi_legacy_keeps_a_session_whose_upload_was_silently_skipped(tmp):
 
 
 def test_kimi_legacy_reuploads_a_same_size_changed_file_before_deleting(tmp):
-    """The bucket's older copy is the same length; only the upload, then the
-    verification of the new bytes, lets the session go."""
+    """The bucket's older copy is the same length; the walk replaces it
+    (the store's signature skip, not the delete gate), then deletes."""
     kimi_dir = Path(tmp) / "kimi"
     sessions = kimi_dir / "sessions"
     uuid_dir = sessions / "hash1" / "uuid-1"
@@ -1898,6 +1902,27 @@ def test_kimi_legacy_reuploads_a_same_size_changed_file_before_deleting(tmp):
     assert not uuid_dir.exists() and not blob.exists()
 
 
+def test_kimi_legacy_keeps_a_session_whose_same_size_copy_was_not_replaced(tmp):
+    """The bucket's older copy is the same length and the replacing upload
+    never happens: the length match alone must not let the session go."""
+    kimi_dir = Path(tmp) / "kimi"
+    sessions = kimi_dir / "sessions"
+    uuid_dir = sessions / "hash1" / "uuid-1"
+    _write(uuid_dir / "wire.jsonl", "{}\n", days_old=10)
+    blob = _write(uuid_dir / "blob.bin", b"NEW!")
+    client = _util.FakeS3(_BUCKET)
+    client.objects = {"sessions/hash1/uuid-1/blob.bin": b"OLD!"}
+    said = []
+    dest = _SkippingStore(client, _BUCKET, said.append, skip=("blob.bin",))
+    dest.inventory()
+    with sandbox(_KIMI, KIMI_DIR=kimi_dir, SESSIONS_DIR=sessions):
+        assert _KIMI.archive_sessions(dest, _cutoff()) == (1, 0, 0)
+    assert dest.skipped == ["sessions/hash1/uuid-1/blob.bin"]
+    assert client.objects["sessions/hash1/uuid-1/blob.bin"] == b"OLD!"
+    assert uuid_dir.exists() and blob.read_bytes() == b"NEW!"
+    assert any(_KEPT in line for line in said), said
+
+
 def test_kimi_archive_sessions_on_a_machine_with_no_sessions_dir(tmp):
     dest, _, _ = _dest()
     with sandbox(_KIMI, KIMI_DIR=Path(tmp) / "absent",
@@ -1910,13 +1935,14 @@ def test_kimi_archives_user_history_and_deletes_the_stale_files(tmp):
     fresh = _write(hist / "hash-fresh.jsonl", '{"q": 1}\n')
     stale = _write(hist / "hash-stale.jsonl", '{"q": 2}\n', days_old=10)
     _write(hist / "notes.txt", "ignored")
-    dest, client, _ = _dest()
+    dest, client, said = _dest()
     with sandbox(_KIMI, USER_HISTORY_DIR=hist):
         assert _KIMI.archive_user_history(dest, _cutoff()) == (2, 1, 0)
     assert sorted(client.objects) == ["user-history/hash-fresh.jsonl.xz",
                                       "user-history/hash-stale.jsonl.xz"]
     assert fresh.exists()
     assert not stale.exists()
+    assert not any(_KEPT in line for line in said), said
 
 
 def test_kimi_user_history_upload_failure_keeps_the_local_file(tmp):
@@ -2033,11 +2059,13 @@ def test_kimi_code_deletes_a_stale_session_and_prunes_the_bucket(tmp):
     sess = _kimi_code_session(kc, "wd_p_0123456789ab", "ses_1")
     for wire in sess.rglob("wire.jsonl"):
         _age(wire, 10)
-    dest, _, _ = _dest()
+    dest, client, said = _dest()
     with sandbox(_KIMI, KIMI_CODE_DIR=kc, KC_SESSIONS_DIR=kc / "sessions"):
         assert _KIMI.archive_kimi_code_sessions(dest, _cutoff()) == (4, 1, 0)
+    assert sorted(client.objects) == sorted(key for _, key in _KC_KEYS)
     assert not sess.exists()
     assert not (kc / "sessions" / "wd_p_0123456789ab").exists()
+    assert not any(_KEPT in line for line in said), said
 
 
 def test_kimi_code_dry_run_keeps_the_session(tmp):
@@ -2150,18 +2178,6 @@ def test_kimi_code_keeps_a_session_when_only_one_of_two_blobs_is_held(tmp):
     assert any(key.endswith("blobs/shot.json.xz") for key in client.objects)
     assert sess.exists() and other.exists()
     assert any(_KEPT in line for line in said), said
-
-
-def test_kimi_code_deletes_a_stale_session_once_every_object_is_held(tmp):
-    """The counterpart: the same session, uploads working, is let go."""
-    kc = Path(tmp) / "kimi-code"
-    sess = _old_kimi_code_session(kc)
-    dest, client, said = _dest()
-    with sandbox(_KIMI, KIMI_CODE_DIR=kc, KC_SESSIONS_DIR=kc / "sessions"):
-        assert _KIMI.archive_kimi_code_sessions(dest, _cutoff()) == (4, 1, 0)
-    assert sorted(client.objects) == sorted(key for _, key in _KC_KEYS)
-    assert not sess.exists()
-    assert not any(_KEPT in line for line in said)
 
 
 def test_kimi_archive_kimi_code_sessions_on_a_machine_without_them(tmp):

@@ -146,6 +146,14 @@ def test_is_old_says_no_for_a_missing_path(tmp):
     assert not _RUNTIME.is_old(Path(tmp) / "gone.txt", time.time())
 
 
+def test_a_kept_path_is_logged_as_not_verified_in_the_bucket(tmp):
+    """The one line every archiver logs for a stale path it left in place."""
+    said = []
+    _RUNTIME.log_kept_unverified(said.append, Path(tmp) / "wire.jsonl")
+    assert said == [f"  kept, not verified in the bucket: "
+                    f"{Path(tmp) / 'wire.jsonl'}"]
+
+
 # --- the local sweeps ---------------------------------------------------------
 
 def test_sweep_files_removes_only_what_is_past_the_cutoff(tmp):

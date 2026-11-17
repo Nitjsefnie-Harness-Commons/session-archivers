@@ -164,11 +164,6 @@ def _publish_marker(dest, session_hash, path):
         return 0, 1
 
 
-def _keep_unverified(dest, path):
-    '''Log why a stale path stays: the bucket does not verifiably hold it.'''
-    dest.log(f'  kept, not verified in the bucket: {path}')
-
-
 def archive_kimi_code_sessions(dest, cutoff):
     '''Archive ~/.kimi-code/sessions/ using the same key layout as legacy.'''
     n_uploaded = n_deleted = n_failed = 0
@@ -268,7 +263,7 @@ def archive_kimi_code_sessions(dest, cutoff):
                 if not (all(dest.holds(path, key) for path, key in files)
                         and all(dest.holds_dir(tree, prefix)
                                 for tree, prefix in trees)):
-                    _keep_unverified(dest, session_dir)
+                    runtime.log_kept_unverified(dest.log, session_dir)
                     continue
                 if dest.dry_run:
                     dest.log(f'  DRY rmtree {session_dir}')
@@ -316,7 +311,7 @@ def archive_sessions(dest, cutoff):
             wire_jsonl = uuid_dir / 'wire.jsonl'
             if wire_jsonl.exists() and runtime.is_old(wire_jsonl, cutoff):
                 if not dest.holds_dir(uuid_dir, r2_prefix):
-                    _keep_unverified(dest, uuid_dir)
+                    runtime.log_kept_unverified(dest.log, uuid_dir)
                     continue
                 if dest.dry_run:
                     dest.log(f'  DRY rmtree {uuid_dir}')
@@ -350,7 +345,7 @@ def archive_user_history(dest, cutoff):
 
         if runtime.is_old(entry, cutoff):
             if not dest.holds(entry, key):
-                _keep_unverified(dest, entry)
+                runtime.log_kept_unverified(dest.log, entry)
                 continue
             if dest.dry_run:
                 dest.log(f'  DRY rm {entry}')

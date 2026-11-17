@@ -115,6 +115,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Check no tracked file carries a merge-conflict marker
@@ -131,6 +132,12 @@ jobs:
             echo "A merge-conflict marker is committed. Resolve the conflict, rebase onto the target branch and push again."
             exit 1
           fi
+
+      - name: Require the head to carry main's gate-defining commits
+        if: github.event_name == 'pull_request'
+        env:
+          SESSION_ARCHIVERS_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 .github/scripts/gate_base_freshness.py
 
       - name: Fold the leg results into one verdict
         env:

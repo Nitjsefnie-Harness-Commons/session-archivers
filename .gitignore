@@ -55,6 +55,7 @@
 !/.github/dependabot.yml
 !/.github/scripts/
 !/.github/scripts/aggregate_gate.py
+!/.github/scripts/gate_base_freshness.py
 !/.github/size-baseline.json
 !/.github/workflows/actionlint.yml
 !/.github/workflows/audit.yml

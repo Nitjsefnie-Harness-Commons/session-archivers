@@ -327,6 +327,44 @@ def test_claude_does_not_delete_when_the_data_dir_upload_failed(tmp):
     assert any("not deleting either" in line for line in said)
 
 
+def _same_size_stale_blob(tmp):
+    """An old session whose data-dir blob changed to bytes of the same
+    length as the copy already in the bucket."""
+    projects = Path(tmp) / "projects"
+    uuid = "oooo-pppp"
+    jsonl = _write(projects / "p" / f"{uuid}.jsonl",
+                   _session_body(_claude_entries()), days_old=10)
+    blob = _write(projects / "p" / uuid / "blob.bin", b"NEW!")
+    dest, zai, client, _, said = _dests()
+    client.objects = {f"p/{uuid}/data/blob.bin": b"OLD!"}
+    dest.inventory()
+    return projects, jsonl, blob, dest, zai, client, said
+
+
+def test_claude_reuploads_a_same_size_changed_blob_before_deleting(tmp):
+    """The bucket's `OLD!` is the same length as the local `NEW!`; deleting
+    the session on that evidence would lose the update."""
+    projects, jsonl, blob, dest, zai, client, _ = _same_size_stale_blob(tmp)
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (2, 1, 0, 0)
+    assert client.objects["p/oooo-pppp/data/blob.bin"] == b"NEW!"
+    assert "p/oooo-pppp/data/blob.bin" in client.puts
+    assert not jsonl.exists() and not blob.exists()
+
+
+def test_claude_keeps_the_session_when_the_blob_reupload_fails(tmp):
+    projects, jsonl, blob, dest, zai, client, said = _same_size_stale_blob(tmp)
+    client.fail_puts.add("p/oooo-pppp/data/blob.bin")
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (1, 0, 1, 0)
+    assert any("put refused: p/oooo-pppp/data/blob.bin" in line
+               for line in said), said
+    assert client.objects["p/oooo-pppp/data/blob.bin"] == b"OLD!"
+    assert jsonl.exists() and blob.read_bytes() == b"NEW!"
+
+
 def test_claude_counts_a_failed_orphan_upload_and_keeps_the_dir(tmp):
     projects = Path(tmp) / "projects"
     orphan = projects / "p" / "kkkk-llll"
@@ -1087,6 +1125,13 @@ def test_codex_deletes_a_stale_rollout_only_once_it_is_in_the_bucket(tmp):
     assert not path.exists()
 
 
+def _stored(dest, path, key):
+    """Seed `dest` as holding `path`'s current bytes compressed at `key`."""
+    st = path.stat()
+    dest.remote = {key + ".xz": 40}
+    dest.manifest = {key + ".xz": [st.st_mtime_ns, st.st_size]}
+
+
 def test_codex_keeps_a_stale_rollout_the_bucket_does_not_have(tmp):
     """`_retire_local` refuses without proof the object is stored."""
     path = _write(Path(tmp) / "rollout.jsonl", "{}\n", days_old=10)
@@ -1095,10 +1140,20 @@ def test_codex_keeps_a_stale_rollout_the_bucket_does_not_have(tmp):
     assert path.exists()
 
 
+def test_codex_keeps_a_stale_rollout_whose_stored_bytes_are_older(tmp):
+    """The object exists but was stored from an earlier state of the file."""
+    path = _write(Path(tmp) / "rollout.jsonl", "{}\n", days_old=10)
+    dest, _, _ = _dest()
+    _stored(dest, path, "sessions/h/t/wire.jsonl")
+    dest.manifest["sessions/h/t/wire.jsonl.xz"][0] -= 1
+    assert not _CODEX._retire_local(path, "sessions/h/t/wire.jsonl", dest, _cutoff())
+    assert path.exists()
+
+
 def test_codex_keeps_a_fresh_rollout_that_is_in_the_bucket(tmp):
     path = _write(Path(tmp) / "rollout.jsonl", "{}\n")
     dest, _, _ = _dest()
-    dest.remote = {"sessions/h/t/wire.jsonl.xz": 40}
+    _stored(dest, path, "sessions/h/t/wire.jsonl")
     assert not _CODEX._retire_local(path, "sessions/h/t/wire.jsonl", dest, _cutoff())
     assert path.exists()
 
@@ -1106,7 +1161,7 @@ def test_codex_keeps_a_fresh_rollout_that_is_in_the_bucket(tmp):
 def test_codex_dry_run_keeps_a_stale_rollout(tmp):
     path = _write(Path(tmp) / "rollout.jsonl", "{}\n", days_old=10)
     dest, _, said = _dest(dry_run=True)
-    dest.remote = {"sessions/h/t/wire.jsonl.xz": 40}
+    _stored(dest, path, "sessions/h/t/wire.jsonl")
     assert not _CODEX._retire_local(path, "sessions/h/t/wire.jsonl", dest, _cutoff())
     assert path.exists()
     assert any("DRY rm " in line for line in said)
@@ -1480,7 +1535,7 @@ def test_codex_keeps_a_stale_rollout_a_live_writer_still_holds(tmp):
     path = _write(Path(tmp) / f"rollout-2026-08-21T10-00-00-{thread}.jsonl",
                   "{}\n", days_old=10)
     dest, _, said = _dest()
-    dest.remote = {"sessions/h/t/wire.jsonl.xz": 40}
+    _stored(dest, path, "sessions/h/t/wire.jsonl")
     with sandbox(_CODEX, WRITER_LOCKS_DIR=locks), \
             _held_writer_lock(locks, thread):
         assert not _CODEX._retire_local(path, "sessions/h/t/wire.jsonl", dest,

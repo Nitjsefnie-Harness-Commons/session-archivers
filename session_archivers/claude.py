@@ -16,8 +16,9 @@ Behaviour per run:
        (sessions served through OpenRouter's Anthropic-compatible endpoint,
        recognised by their `gen-` message ids). A session naming no known
        family (only unknown model ids, or no model recorded) is NOT archived
-       anywhere: it is logged and left in place. Upload (size-skip,
-       idempotent), then delete locally if jsonl mtime > DAYS — only once
+       anywhere: it is logged and left in place. Upload (skipped while the
+       manifest signature matches; idempotent), then delete locally if
+       jsonl mtime > DAYS — only once
        every family's upload succeeded.
      Pass 2 — orphan UUID dirs (no matching jsonl, excluding memory/, tasks/):
        classified by the transcript inside them when one is there; a dir with
@@ -366,7 +367,7 @@ def main():
             log(f'remote inventory: {len(each.inventory()):,} objects '
                 f'in bucket {each.bucket!r}')
             log(f'manifest {store.manifest_key()}: '
-                f'{len(each.load_manifest()):,} known compressed objects')
+                f'{len(each.load_manifest()):,} known stored objects')
 
         n_up, n_del, n_fail, n_skip = archive_projects(
             dest, zai_dest, cutoff, llama_dest=llama_dest,

@@ -294,13 +294,105 @@ def test_the_inventory_of_an_empty_bucket_is_an_empty_dict(tmp):
     assert dest.inventory() == {}
 
 
-def test_holds_recognises_either_storage_form(tmp):
+def _sig(path):
+    st = path.stat()
+    return [st.st_mtime_ns, st.st_size]
+
+
+def test_holds_recognises_every_storage_form_of_the_current_bytes(tmp):
     """The check a retention gate makes before deleting the local copy."""
+    dest, client, _ = _store()
+    text = _write(Path(tmp) / "text.jsonl", "x\n" * 100)
+    plain = _write(Path(tmp) / "plain.bin", _incompressible(4096))
+    packed = _write(Path(tmp) / "old.jsonl.xz", lzma.compress(b"squeezed"))
+    for src, key in ((text, "a/text.jsonl"), (plain, "a/plain.bin"),
+                     (packed, "a/old.jsonl.xz")):
+        assert not dest.holds(src, key), key
+        assert dest.upload_file(src, key)
+        assert dest.holds(src, key), key
+    assert sorted(client.objects) == ["a/old.jsonl.xz", "a/plain.bin",
+                                      "a/text.jsonl.xz"]
+
+
+def test_holds_is_false_for_a_same_size_object_with_other_bytes(tmp):
+    """The object is there and the size matches, but it holds older bytes:
+    deleting the local file on that evidence would lose the update."""
     dest, _, _ = _store()
-    dest.remote = {"a/plain.bin": 10, "a/text.jsonl.xz": 40}
-    assert dest.holds("a/plain.bin")
-    assert dest.holds("a/text.jsonl")
-    assert not dest.holds("a/missing.jsonl")
+    plain = _write(Path(tmp) / "plain.bin", b"NEW!", days_old=1)
+    text = _write(Path(tmp) / "text.jsonl", "{}\n", days_old=1)
+    dest.remote = {"a/plain.bin": 4, "a/text.jsonl.xz": 3}
+    assert not dest.holds(plain, "a/plain.bin")  # no signature recorded
+    assert not dest.holds(text, "a/text.jsonl")
+    stale = [_sig(plain)[0] - 1, 4]
+    dest.manifest = {"a/plain.bin": stale,
+                     "a/text.jsonl.xz": [_sig(text)[0] - 1, 3]}
+    assert not dest.holds(plain, "a/plain.bin")  # signature of older bytes
+    assert not dest.holds(text, "a/text.jsonl")
+
+
+def test_holds_needs_the_object_as_well_as_its_signature(tmp):
+    """A manifest entry alone is no proof: the object may have been deleted
+    remotely since, and the inventory is what this run saw."""
+    dest, _, _ = _store()
+    plain = _write(Path(tmp) / "plain.bin", b"NEW!")
+    dest.manifest = {"a/plain.bin": _sig(plain), "a/plain.bin.xz": _sig(plain)}
+    assert not dest.holds(plain, "a/plain.bin")
+    dest.remote = {"a/plain.bin": 4}
+    assert dest.holds(plain, "a/plain.bin")
+
+
+def test_holds_is_false_for_a_file_that_vanished(tmp):
+    """Nothing local to compare against, so nothing is proven stored."""
+    dest, _, _ = _store()
+    src = _write(Path(tmp) / "wire.jsonl", "x\n" * 100)
+    dest.upload_file(src, "k/wire.jsonl")
+    assert dest.holds(src, "k/wire.jsonl")
+    src.unlink()
+    assert not dest.holds(src, "k/wire.jsonl")
+
+
+def test_holds_dir_is_true_once_every_file_is_stored(tmp):
+    """Keyed exactly as upload_dir keys them, nested paths included."""
+    dest, _, _ = _store()
+    root = Path(tmp) / "data"
+    _write(root / "top.json", '{"a": 1}')
+    _write(root / "nested" / "deep" / "blob.bin", _incompressible(4096))
+    assert not dest.holds_dir(root, "p/u/data")
+    assert dest.upload_dir(root, "p/u/data") == 2
+    assert dest.holds_dir(root, "p/u/data")
+    assert not dest.holds_dir(root, "p/u/other")
+
+
+def test_holds_dir_is_false_when_one_file_changed_since_upload(tmp):
+    dest, _, _ = _store()
+    root = Path(tmp) / "data"
+    _write(root / "a.json", "{}", days_old=2)
+    blob = _write(root / "b.bin", b"OLD!", days_old=2)
+    dest.upload_dir(root, "p")
+    _write(blob, b"NEW!", days_old=1)  # same size, other bytes
+    assert not dest.holds_dir(root, "p")
+
+
+def test_holds_dir_is_false_when_one_file_was_never_uploaded(tmp):
+    dest, _, _ = _store()
+    root = Path(tmp) / "data"
+    _write(root / "a.json", "{}")
+    dest.upload_dir(root, "p")
+    _write(root / "late.json", "{}")
+    assert not dest.holds_dir(root, "p")
+
+
+def test_a_real_run_never_counts_a_failed_upload_as_held(tmp):
+    dest, client, _ = _store()
+    src = _write(Path(tmp) / "blob.bin", b"NEW!")
+    client.fail_puts.add("k/blob.bin")
+    try:
+        dest.upload_file(src, "k/blob.bin")
+    except RuntimeError as e:
+        assert "put refused: k/blob.bin" in str(e)
+    else:
+        raise AssertionError("the injected put failure never fired")
+    assert not dest.holds(src, "k/blob.bin")
 
 
 # --- compression policy ------------------------------------------------------------
@@ -355,7 +447,7 @@ def test_an_incompressible_binary_is_stored_plain(tmp):
     assert client.objects["k/blob.bin"] == blob
     assert "k/blob.bin.xz" not in client.objects
     assert dest.remote["k/blob.bin"] == len(blob)
-    assert dest.manifest == {}
+    assert dest.manifest == {"k/blob.bin": _sig(src)}
 
 
 def test_a_compressible_binary_is_stored_xz(tmp):
@@ -366,12 +458,55 @@ def test_a_compressible_binary_is_stored_xz(tmp):
 
 
 def test_an_unchanged_plain_binary_is_not_uploaded_twice(tmp):
-    """The plain leg skips on a remote size match, not on the manifest."""
+    """The plain leg skips on the manifest signature, like the xz leg."""
     dest, client, _ = _store()
     src = _write(Path(tmp) / "blob.bin", _incompressible(4096))
     dest.upload_file(src, "k/blob.bin")
+    assert dest.manifest == {"k/blob.bin": _sig(src)}
     assert not dest.upload_file(src, "k/blob.bin")
     assert client.puts == ["k/blob.bin"]
+
+
+def test_a_same_size_changed_plain_binary_is_uploaded_again(tmp):
+    """Matching byte length is not matching bytes."""
+    dest, client, _ = _store()
+    blob = _incompressible(4096)
+    src = _write(Path(tmp) / "blob.bin", blob, days_old=2)
+    dest.upload_file(src, "k/blob.bin")
+    _write(src, blob[::-1], days_old=1)
+    assert dest.upload_file(src, "k/blob.bin")
+    assert client.objects["k/blob.bin"] == blob[::-1]
+    assert client.puts == ["k/blob.bin", "k/blob.bin"]
+    assert dest.manifest == {"k/blob.bin": _sig(src)}
+
+
+def test_a_plain_object_with_no_recorded_signature_is_uploaded_once(tmp):
+    """An object stored before plain uploads were signed: the size matches,
+    so nothing proves its bytes are these. One re-upload, then signed."""
+    dest, client, _ = _store()
+    src = _write(Path(tmp) / "blob.bin", b"NEW!")
+    client.objects = {"k/blob.bin": b"OLD!"}
+    dest.inventory()
+    assert dest.upload_file(src, "k/blob.bin")
+    assert client.objects["k/blob.bin"] == b"NEW!"
+    assert not dest.upload_file(src, "k/blob.bin")
+    assert client.puts == ["k/blob.bin"]
+
+
+def test_a_manifest_written_before_plain_signatures_is_honoured(tmp):
+    """Its compressed entries keep skipping exactly as they did."""
+    dest, client, _ = _store()
+    src = _write(Path(tmp) / "wire.jsonl", "x\n" * 100)
+    client.objects = {
+        "k/wire.jsonl.xz": lzma.compress(src.read_bytes()),
+        _STORE.manifest_key(): json.dumps(
+            {"k/wire.jsonl.xz": _sig(src)}).encode("utf-8"),
+    }
+    dest.inventory()
+    dest.load_manifest()
+    assert dest.holds(src, "k/wire.jsonl")
+    assert not dest.upload_file(src, "k/wire.jsonl")
+    assert client.puts == []
 
 
 def test_an_already_compressed_input_is_stored_verbatim(tmp):
@@ -382,24 +517,42 @@ def test_an_already_compressed_input_is_stored_verbatim(tmp):
     assert dest.upload_file(src, "k/old.jsonl.xz")
     assert client.objects["k/old.jsonl.xz"] == payload
     assert "k/old.jsonl.xz.xz" not in client.objects
-    assert dest.manifest == {}
+    assert dest.manifest == {"k/old.jsonl.xz": _sig(src)}
 
 
-def test_a_verbatim_object_already_the_right_size_is_skipped(tmp):
+def test_a_verbatim_object_with_a_matching_signature_is_skipped(tmp):
     dest, client, _ = _store()
     src = _write(Path(tmp) / "old.jsonl.xz", b"12345")
     dest.remote = {"k/old.jsonl.xz": 5}
+    dest.manifest = {"k/old.jsonl.xz": _sig(src)}
     assert not dest.upload_file(src, "k/old.jsonl.xz")
     assert client.puts == []
 
 
+def test_a_same_size_verbatim_object_without_its_signature_is_replaced(tmp):
+    """The verbatim leg trusted a size match too; it no longer does."""
+    dest, client, _ = _store()
+    src = _write(Path(tmp) / "old.jsonl.xz", b"NEW!!")
+    client.objects = {"k/old.jsonl.xz": b"OLD!!"}
+    dest.inventory()
+    assert dest.upload_file(src, "k/old.jsonl.xz")
+    assert client.objects["k/old.jsonl.xz"] == b"NEW!!"
+    dest.manifest = {"k/old.jsonl.xz": [_sig(src)[0] - 1, 5]}
+    assert dest.upload_file(src, "k/old.jsonl.xz")  # a stale signature too
+    assert client.puts == ["k/old.jsonl.xz", "k/old.jsonl.xz"]
+
+
 def test_the_manifest_object_is_never_compressed_on_the_upload_path(tmp):
-    """It is read back with json.loads; an xz'd manifest is unreadable."""
+    """It is read back with json.loads; an xz'd manifest is unreadable.
+    Nor does it record a signature for itself, so it is always written."""
     dest, client, _ = _store()
     key = _STORE.manifest_key()
     src = _write(Path(tmp) / "manifest.json", b'{"a": [1, 2]}')
     assert dest.upload_file(src, key)
     assert json.loads(client.objects[key]) == {"a": [1, 2]}
+    assert dest.manifest == {}
+    assert dest.upload_file(src, key)
+    assert client.puts == [key, key]
 
 
 def test_a_file_that_vanished_between_walk_and_upload_is_skipped(tmp):
@@ -440,6 +593,7 @@ def test_flipping_to_compressed_deletes_the_plain_twin(tmp):
     assert "k/blob.bin" not in dest.remote
     assert "k/blob.bin" not in client.objects
     assert "k/blob.bin.xz" in client.objects
+    assert dest.manifest == {"k/blob.bin.xz": _sig(src)}
 
 
 def test_flipping_to_plain_deletes_the_compressed_twin_and_its_signature(tmp):
@@ -450,7 +604,7 @@ def test_flipping_to_plain_deletes_the_compressed_twin_and_its_signature(tmp):
     _write(src, _incompressible(4096))
     assert dest.upload_file(src, "k/blob.bin")
     assert client.deletes == ["k/blob.bin.xz"]
-    assert dest.manifest == {}
+    assert dest.manifest == {"k/blob.bin": _sig(src)}
     assert "k/blob.bin.xz" not in dest.remote
     assert client.objects["k/blob.bin"] == _incompressible(4096)
 
@@ -465,6 +619,8 @@ def test_a_failed_twin_delete_is_logged_and_the_upload_still_counts(tmp):
     assert dest.upload_file(src, "k/blob.bin")
     assert any("stale-twin delete failed: k/blob.bin" in line for line in said)
     assert "k/blob.bin.xz" in client.objects
+    # The twin outlived its delete, but not its signature: its bytes are old.
+    assert dest.manifest == {"k/blob.bin.xz": _sig(src)}
 
 
 def test_no_twin_delete_is_attempted_when_there_is_no_twin(tmp):

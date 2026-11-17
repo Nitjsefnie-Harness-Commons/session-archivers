@@ -8,11 +8,13 @@ Designed to run hourly via cron. Behaviour per run:
 1. Acquire single-instance lock. If a previous run still holds it, exit
    silently.
 2. For every rollout under ~/.codex/sessions/YYYY/MM/DD/, read its
-   session_meta head, derive its key, upload (size-skip, idempotent).
+   session_meta head, derive its key, upload (skipped while the manifest
+   signature matches; idempotent).
 3. Publish one sessions/<hash>/project.json marker per project so the
    dashboard can show a path instead of a hash.
-4. Delete a local rollout once it is uploaded AND older than DAYS, unless
-   a live Codex writer still holds its thread-writer lock.
+4. Delete a local rollout once the bucket holds its current bytes AND it
+   is older than DAYS, unless a live Codex writer still holds its
+   thread-writer lock.
 5. Log a one-liner summary to ~/.codex/archive-codex-sessions.log.
 6. Prune ~/.codex/thread_history_1.sqlite: drop the rows of every thread
    whose rollout is no longer on disk (see prune_thread_history).
@@ -50,7 +52,7 @@ Flags:
 Exit code: 0 on success, 1 if any upload failed.
 '''
 
-__version__ = '2.1.0'
+__version__ = '2.1.1'
 # Cross-platform: must work on Linux AND Windows. No POSIX-only calls without
 # a Windows fallback. Bump __version__ (SemVer) on every substantive change.
 
@@ -325,7 +327,7 @@ def _retire_local(path, key, dest, cutoff):
     '''
     if not runtime.is_old(path, cutoff):
         return False
-    if not dest.holds(key):
+    if not dest.holds(path, key):
         return False
     if writer_lock_held(rollout_uuid(path)):
         dest.log(f'  kept, a live writer still holds it: {path}')

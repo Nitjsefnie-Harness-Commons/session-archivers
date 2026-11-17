@@ -26,10 +26,14 @@ same way:
     keys transparently, with no third-party dependency, because lzma is
     stdlib.
   * The MANIFEST is per machine, `manifests/<machine-hash>.json`, plain JSON,
-    never compressed. A compressed object's remote size cannot be compared
-    against the plain local file to decide "already uploaded, unchanged", so
-    each machine records `{store_key: [mtime_ns, size]}` instead. N machines
-    write N manifests and never clobber each other.
+    never compressed. It records `{store_key: [mtime_ns, size]}`, the local
+    file's signature when it was stored, for every object an upload stores in
+    any form (the manifest itself excepted). A remote size cannot decide
+    "already uploaded, unchanged": a compressed object's size is not the
+    file's, and a plain one of the same size can hold older bytes. So an
+    object counts as current, for skipping an upload and for `holds`, only
+    while its recorded signature matches the file. N machines write N
+    manifests and never clobber each other.
 """
 
 import hashlib
@@ -79,6 +83,27 @@ def machine_hash():
 
 def manifest_key():
     return f'{MANIFEST_PREFIX}/{machine_hash()}.json'
+
+
+def _signature(st):
+    '''What the manifest records for a stored object: the local file's
+    `[mtime_ns, size]` when it was stored (a list, as JSON reads it back).'''
+    return [st.st_mtime_ns, st.st_size]
+
+
+def _stored_forms(key):
+    '''Every key `upload_file(path, key)` can store under: an already-.xz
+    input verbatim, anything else compressed or plain.'''
+    return (key,) if key.endswith('.xz') else (key + '.xz', key)
+
+
+def _dir_keys(local_dir, prefix):
+    '''(path, key) for every file under `local_dir`, keyed by its
+    POSIX-spelled relative path so the keys are identical whichever OS
+    uploaded them.'''
+    for path in local_dir.rglob('*'):
+        if path.is_file():
+            yield path, f'{prefix}/{path.relative_to(local_dir).as_posix()}'
 
 
 def r2_config():
@@ -175,22 +200,39 @@ class Store:
         self.client.put_object(Bucket=self.bucket, Key=key, Body=body)
         self.log(f'manifest saved: {key} ({len(self.manifest):,} entries)')
 
-    def holds(self, key):
-        '''True when the bucket has this object in either storage form.
+    def holds(self, local_path, key):
+        '''True when the bucket holds THIS file's current bytes under `key`,
+        in either storage form.
 
         The check a retention gate makes before deleting a local file: a
-        failed upload must never take the only copy with it.
+        failed upload must never take the only copy with it, and an object
+        of the same size may still hold older bytes. So a stored form counts
+        only while the manifest records this file's current signature for
+        it. A file that vanished proves nothing and reads False.
         '''
-        return key in self.remote or key + '.xz' in self.remote
+        try:
+            st = local_path.stat()
+        except OSError:
+            return False
+        return self._held(key, _signature(st))
+
+    def holds_dir(self, local_dir, prefix):
+        '''`holds` for every file `upload_dir(local_dir, prefix)` uploads.'''
+        return all(self.holds(path, key)
+                   for path, key in _dir_keys(local_dir, prefix))
+
+    def _held(self, key, sig):
+        return any(form in self.remote and self.manifest.get(form) == sig
+                   for form in _stored_forms(key))
 
     # --- uploads -------------------------------------------------------------
 
     def upload_file(self, local_path, key):
         '''Upload `local_path` under `key`. True when an upload happened.
 
-        Skips when an up-to-date copy already exists — compressed (the
-        manifest signature matches) or plain (the remote size matches). The
-        stale twin is deleted whenever the chosen form flips.
+        Skips when a stored form of `key` carries this file's current
+        manifest signature; a size match alone never skips. The stale twin
+        is deleted whenever the chosen form flips.
         '''
         try:
             st = local_path.stat()
@@ -199,25 +241,24 @@ class Store:
             # changes under the archiver mid-run.
             return False
 
-        if key.endswith('.xz') or key.startswith(MANIFEST_PREFIX + '/'):
-            return self._upload_verbatim(local_path, key, st)
-
-        xz_key = key + '.xz'
-        sig = [st.st_mtime_ns, st.st_size]
-        if xz_key in self.remote and self.manifest.get(xz_key) == sig:
+        if key.startswith(MANIFEST_PREFIX + '/'):
+            return self._upload_verbatim(local_path, key, st, None)
+        sig = _signature(st)
+        if self._held(key, sig):
             return False
-        if self.remote.get(key) == st.st_size:
-            return False
+        if key.endswith('.xz'):
+            return self._upload_verbatim(local_path, key, st, sig)
         if self.dry_run:
             self.log(f'  DRY upload {key} ({st.st_size:,} B)')
             return True
 
+        xz_key = key + '.xz'
         data = local_path.read_bytes()
         comp = lzma.compress(data, preset=XZ_PRESET)
         if is_text(key) or len(comp) < len(data):
             self._store_compressed(key, xz_key, comp, sig)
         else:
-            self._store_plain(key, xz_key, data)
+            self._store_plain(key, xz_key, data, sig)
         return True
 
     def upload_bytes(self, body, key):
@@ -238,31 +279,29 @@ class Store:
         Returns the number of objects uploaded, not files visited.
         '''
         uploaded = 0
-        for path in local_dir.rglob('*'):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(local_dir).as_posix()
-            if self.upload_file(path, f'{prefix}/{rel}'):
+        for path, key in _dir_keys(local_dir, prefix):
+            if self.upload_file(path, key):
                 uploaded += 1
         return uploaded
 
     # --- storage forms -------------------------------------------------------
 
-    def _upload_verbatim(self, local_path, key, st):
+    def _upload_verbatim(self, local_path, key, st, sig):
         '''Store an object exactly as it sits on disk.
 
         For inputs that are already compressed — re-compressing would
         double-wrap them — and for the manifest, which is read back as plain
-        JSON and must never be xz'd.
+        JSON and must never be xz'd. The manifest passes no `sig`: it records
+        no signature for itself, so it is written every time it is asked.
         '''
-        if self.remote.get(key) == st.st_size:
-            return False
         if self.dry_run:
             self.log(f'  DRY upload {key} ({st.st_size:,} B)')
             return True
-        self.client.put_object(Bucket=self.bucket, Key=key,
-                               Body=local_path.read_bytes())
-        self.remote[key] = st.st_size
+        body = local_path.read_bytes()
+        self.client.put_object(Bucket=self.bucket, Key=key, Body=body)
+        self.remote[key] = len(body)
+        if sig is not None:
+            self.manifest[key] = sig
         return True
 
     def _store_compressed(self, key, xz_key, comp, sig):
@@ -271,11 +310,11 @@ class Store:
         self.remote[xz_key] = len(comp)
         self._drop_stale_twin(key)
 
-    def _store_plain(self, key, xz_key, data):
+    def _store_plain(self, key, xz_key, data, sig):
         self.client.put_object(Bucket=self.bucket, Key=key, Body=data)
+        self.manifest[key] = sig
         self.remote[key] = len(data)
         self._drop_stale_twin(xz_key)
-        self.manifest.pop(xz_key, None)
 
     def _drop_stale_twin(self, key):
         '''Delete the other storage form, if the bucket has one.
@@ -284,8 +323,10 @@ class Store:
         where xz helps — and leaving both behind makes ingest see the same
         transcript under two keys. Losing this delete costs a duplicate;
         losing the upload would cost data, so a failure here is logged and
-        the upload still counts.
+        the upload still counts. The twin's signature goes either way: its
+        bytes are no longer the file's.
         '''
+        self.manifest.pop(key, None)
         if key not in self.remote:
             return
         try:

@@ -55,7 +55,7 @@ python -m build --wheel
 # audit: the package, then every root requirements manifest
 pip install -r requirements-pip-audit.txt
 pip-audit .
-for m in requirements*.txt; do pip-audit -r "$m"; done
+ls requirements*.txt | xargs -n1 pip-audit -r
 
 # actionlint (zizmor half); CI sets GH_TOKEN so zizmor's online audits run,
 # and without it zizmor runs offline with fewer audits

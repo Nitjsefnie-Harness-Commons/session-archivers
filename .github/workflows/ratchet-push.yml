@@ -1,0 +1,133 @@
+name: ratchet push
+
+# Pushes the coverage floor raise tests.yml stages on a main push; top-level,
+# as the main-push secret reads empty in ci-gate.yml's callees. No repository
+# code runs: main is fetched into a bare repository, the commit is built with
+# git plumbing and the JSON is checked by python3 -I. CONTRIBUTING.md says
+# when main moving drops a raise.
+
+on:
+  workflow_run:  # zizmor: ignore[dangerous-triggers]
+    # The job's if admits only a successful push run on this repository's main.
+    workflows: [ci gate]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  # Queued, never cancelled: tag.yml refuses a cancelled check on main's tip.
+  group: ratchet-push
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  push:
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.conclusion == 'success'
+    environment: main-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read  # the triggering run's artifacts
+
+    steps:
+      - name: List the triggering run's artifacts
+        id: list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SESSION_ARCHIVERS_REPO: ${{ github.repository }}
+          SESSION_ARCHIVERS_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          names="$(gh api -H 'Cache-Control: no-cache' --paginate \
+            "repos/$SESSION_ARCHIVERS_REPO/actions/runs/$SESSION_ARCHIVERS_RUN_ID/artifacts" \
+            --jq '.artifacts[] | select(.expired != true) | .name')"
+          staged=false
+          if grep -qx 'ratchet-push' <<< "$names"; then
+            staged=true
+            mkdir "$RUNNER_TEMP/ratchet-data"
+          fi
+          echo "staged=$staged" >> "$GITHUB_OUTPUT"
+          echo "ratchet-push artifact present: $staged"
+
+      - name: Download the staged raise
+        if: steps.list.outputs.staged == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ratchet-push
+          path: ${{ runner.temp }}/ratchet-data
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Push the raise to main
+        if: steps.list.outputs.staged == 'true'
+        env:
+          SESSION_ARCHIVERS_MASTER_PUSH_DEPLOY_KEY: ${{ secrets.MASTER_PUSH_DEPLOY_KEY }}
+          SESSION_ARCHIVERS_REPO: ${{ github.repository }}
+          SESSION_ARCHIVERS_BASE: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          # Never fall back to a token.
+          if [ -z "$SESSION_ARCHIVERS_MASTER_PUSH_DEPLOY_KEY" ]; then
+            echo "MASTER_PUSH_DEPLOY_KEY is empty: the main-push environment is missing its secret" >&2
+            exit 1
+          fi
+          staged="$RUNNER_TEMP/ratchet-data/ci-thresholds.json"
+          if [ ! -f "$staged" ]; then
+            echo "the ratchet-push artifact carries no ci-thresholds.json" >&2
+            exit 1
+          fi
+          base="$SESSION_ARCHIVERS_BASE"
+          file=.github/ci-thresholds.json
+          drop() {
+            echo "::notice::Raise dropped: $1"
+            printf '### Raise dropped: %s\n\nThe next main push that measures above the hysteresis raises it.\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+          eval "$(ssh-agent -s)" >/dev/null
+          trap 'kill "$SSH_AGENT_PID" 2>/dev/null || true' EXIT
+          ssh-add - <<< "$SESSION_ARCHIVERS_MASTER_PUSH_DEPLOY_KEY"
+          mkdir -p ~/.ssh
+          # From https://api.github.com/meta
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=yes'
+          repo="$RUNNER_TEMP/ratchet-repo"
+          git init --bare -q "$repo"
+          git -C "$repo" remote add origin "git@github.com:$SESSION_ARCHIVERS_REPO.git"
+          git -C "$repo" fetch --quiet origin main
+          fetched="$(git -C "$repo" rev-parse FETCH_HEAD)"
+          current="$RUNNER_TEMP/current-thresholds.json"
+          git -C "$repo" show "$fetched:$file" > "$current"
+          if [ "$fetched" = "$base" ]; then
+            cp "$staged" "$current"
+          else
+            moved="$(git -C "$repo" diff --name-only "$base" "$fetched" -- ":(exclude)$file")" \
+              || drop "the measured commit $base is not in main's history"
+            [ -z "$moved" ] || drop "main changed more than $file since the measured commit"
+            git -C "$repo" show "$base:$file" > "$RUNNER_TEMP/base-thresholds.json"
+            git merge-file "$current" "$RUNNER_TEMP/base-thresholds.json" "$staged" \
+              || drop "the raise conflicts with a change main made to $file"
+          fi
+          python3 -I -c 'import json, sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$current" \
+            || drop "the merged $file is not valid JSON"
+          git -C "$repo" read-tree "$fetched"
+          blob="$(git -C "$repo" hash-object -w "$current")"
+          git -C "$repo" update-index --cacheinfo "100644,$blob,$file"
+          tree="$(git -C "$repo" write-tree)"
+          if [ "$tree" = "$(git -C "$repo" rev-parse "$fetched^{tree}")" ]; then
+            echo "main already holds this raise: nothing to commit."
+            exit 0
+          fi
+          commit="$(git -C "$repo" -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit-tree "$tree" -p "$fetched" -m 'chore(ratchet): raise the coverage floor (automated)')"
+          if ! git -C "$repo" push --quiet origin "$commit:refs/heads/main"; then
+            git -C "$repo" fetch --quiet origin main
+            if [ "$fetched" = "$(git -C "$repo" rev-parse FETCH_HEAD)" ]; then
+              echo "the push was rejected while main stood still" >&2
+              exit 1
+            fi
+            drop "main moved before the push landed"
+          fi
+          echo "Pushed $commit to main."

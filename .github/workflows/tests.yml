@@ -190,8 +190,30 @@ jobs:
 
       - name: Coverage gate
         if: ${{ !cancelled() && steps.measure.conclusion == 'success' }}
-        # A RATCHET, not a target. 94 sits just under the 95.4%
-        # measured after the shared store/runtime extraction, so ordinary
-        # churn stays green and a real regression goes red. Raise the floor by
-        # hand as coverage climbs — never lower it to make a red build green.
-        run: python -m coverage report --fail-under=94 --precision=1
+        # The floor is data in .github/ci-thresholds.json, raised by
+        # ratchet-push.yml; never lower it to make a red build green.
+        run: |
+          floor="$(python .github/scripts/ratchet_thresholds.py floor .github/ci-thresholds.json)"
+          python -m coverage report --fail-under="$floor" --precision=1
+
+      - name: Stage a coverage floor raise
+        id: stage
+        # Main pushes only (the caller's event under ci-gate.yml): a pull
+        # request measures a merge tree main never holds.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          measured="$(python -m coverage report --format=total --precision=1)"
+          python .github/scripts/ratchet_thresholds.py stage .github/ci-thresholds.json \
+            --measured "$measured" --out-dir "$RUNNER_TEMP/ratchet-push"
+          if [ -f "$RUNNER_TEMP/ratchet-push/ci-thresholds.json" ]; then
+            echo "staged=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload the staged raise
+        if: steps.stage.outputs.staged == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ratchet-push
+          path: ${{ runner.temp }}/ratchet-push/ci-thresholds.json
+          if-no-files-found: error
+          retention-days: 1

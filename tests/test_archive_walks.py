@@ -1637,7 +1637,7 @@ def _kimi_code_session(kc, bucket, session, workdir=None):
     sess = kc / "sessions" / bucket / session
     _write(sess / "agents" / "main" / "wire.jsonl", '{"main": 1}\n')
     _write(sess / "agents" / "agent-1" / "wire.jsonl", '{"sub": 1}\n')
-    _write(sess / "agents" / "agent-1" / "blobs" / "shot.json", "{}")
+    _write(sess / "agents" / "agent-1" / "blobs" / "s" / "shot.json", "{}")
     state = {"agents": {"main": {}}}
     if workdir:
         state["agents"]["main"]["homedir"] = (
@@ -1652,7 +1652,7 @@ _KC_KEYS = (  # (kind, key, the marker its failed upload logs)
     ("main wire", "sessions/0123456789ab/ses_1/wire.jsonl.xz", "main_wire"),
     ("subagent wire",
      "sessions/0123456789ab/ses_1/subagents/agent-1/wire.jsonl.xz", "subagent_wire"),
-    ("blob", "sessions/0123456789ab/ses_1/subagents/agent-1/blobs/shot.json.xz",
+    ("blob", "sessions/0123456789ab/ses_1/subagents/agent-1/blobs/s/shot.json.xz",
      "blobs="),
     ("state", "sessions/0123456789ab/ses_1/state.json.xz", "state="),
     ("plan", "sessions/0123456789ab/ses_1/agents/main/plans/p1.md", "file="),
@@ -1788,20 +1788,20 @@ def test_kimi_code_keeps_a_session_when_only_one_of_two_blobs_is_held(tmp):
     assert _kc_walk(kc, dest, _cutoff()) == (len(_KC_KEYS), 0, 0)
     assert dest.skipped == ["sessions/0123456789ab/ses_1/subagents/agent-1/"
                             "blobs/other.json"]
-    assert any(key.endswith("blobs/shot.json.xz") for key in client.objects)
+    assert any(key.endswith("blobs/s/shot.json.xz") for key in client.objects)
     assert sess.exists() and other.exists()
     assert any(_KEPT in line for line in said), said
 
 
 def test_kimi_code_never_uploads_or_deletes_a_wire_no_leg_archives(tmp):
-    """A reader takes any wire.jsonl key for a transcript; one nested below
-    `agents/<agent>/` gets none, so its session stays."""
-    sess = _old_kimi_code_session(Path(tmp) / "kc")
-    nested = _write(sess / "agents/main/deep/wire.jsonl", "{}\n", days_old=10)
-    dest, client, said = _dest()
-    assert _kc_walk(Path(tmp) / "kc", dest, _cutoff()) == (len(_KC_KEYS), 0, 0)
-    assert sorted(client.objects) == sorted(key for _, key, _ in _KC_KEYS)
-    assert nested.exists() and any(_KEPT in line for line in said), said
+    """A reader takes either name for a transcript: its session stays."""
+    for name in ("wire.jsonl", "wire.jsonl.xz"):
+        sess = _old_kimi_code_session(Path(tmp) / name)
+        nested = _write(sess / "agents/main/deep" / name, "{}\n", days_old=10)
+        dest, client, said = _dest()
+        assert _kc_walk(Path(tmp) / name, dest, _cutoff()) == (len(_KC_KEYS), 0, 0), name
+        assert sorted(client.objects) == sorted(key for _, key, _ in _KC_KEYS), name
+        assert nested.exists() and any(_KEPT in line for line in said), name
 
 
 def test_kimi_cleanup_sweeps_logs_and_telemetry(tmp):

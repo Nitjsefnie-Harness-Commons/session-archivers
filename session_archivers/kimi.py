@@ -248,7 +248,7 @@ def archive_kimi_code_sessions(dest, cutoff):
             for path in session_dir.rglob('*'):
                 if not path.is_file() or path in covered:
                     continue
-                if path.name == 'wire.jsonl':
+                if path.name in ('wire.jsonl', 'wire.jsonl.xz'):
                     # Any wire.jsonl key reads as a transcript: store none here.
                     stray_wire = True
                     continue

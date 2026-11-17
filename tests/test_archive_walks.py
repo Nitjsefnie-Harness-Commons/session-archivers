@@ -939,6 +939,7 @@ def test_claude_main_survives_a_bucket_it_cannot_list(tmp):
         assert jsonl.exists() == orphan.exists() == (not deleted), routed
         for bucket in (_LLAMA_BUCKET, _OPENROUTER_BUCKET):
             assert f"bucket {bucket!r} unreachable: ClientError" in out, routed
+        assert out.count("known stored objects") == 2, routed  # claude, zai only
         assert (f"done — uploaded=3 deleted={deleted} failures={failures} "
                 "skipped_unknown=0") in out, routed
 

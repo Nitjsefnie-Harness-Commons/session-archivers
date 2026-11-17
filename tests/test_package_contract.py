@@ -108,13 +108,13 @@ def test_the_version_is_a_single_source_of_truth(_tmp):
         None)
     assert isinstance(version, str) and re.fullmatch(
         r"[0-9]+\.[0-9]+\.[0-9]+(\.dev[0-9]+)?", version), version
-    # Every module and any store of the name, so a later module is covered.
+    # Name stores outside the root; except/case/import-as, def, globals() miss.
     for path in PACKAGE.rglob("*.py"):
         stores = [node for node in ast.walk(ast.parse(
             path.read_text(encoding="utf-8"))) if isinstance(node, ast.Name)
             and node.id == "__version__" and isinstance(node.ctx, ast.Store)]
-        assert path.name == "__init__.py" or not stores, \
-            f"{path.name} declares its own __version__"
+        assert path == PACKAGE / "__init__.py" or not stores, \
+            f"{path.relative_to(ROOT)} declares its own __version__"
     for name in ("kimi", "codex"):
         assert _import(name).__version__ == version, name
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")

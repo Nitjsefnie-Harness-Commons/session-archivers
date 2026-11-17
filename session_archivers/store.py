@@ -203,14 +203,15 @@ class Store:
         self.log(f'manifest saved: {key} ({len(self.manifest):,} entries)')
 
     def holds(self, local_path, key):
-        '''True when the bucket holds THIS file's current bytes under `key`,
-        in either storage form.
+        '''True when the bucket holds an object stored from THIS file as it
+        is now, under `key` in either storage form.
 
         The check a retention gate makes before deleting a local file: a
         failed upload must never take the only copy with it, and an object
         of the same size may still hold older bytes. So a stored form counts
-        only while the manifest records this file's current signature for
-        it. A file that vanished proves nothing and reads False. In a dry
+        only while the manifest records this file's present `[mtime_ns,
+        size]` signature for it (see the module docstring).
+        A file that vanished proves nothing and reads False. In a dry
         run, a key this run reported it would upload counts too, so the
         preview shows the deletions a real run would make.
         '''

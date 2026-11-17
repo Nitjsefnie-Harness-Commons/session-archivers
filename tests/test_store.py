@@ -496,6 +496,22 @@ def test_a_same_size_changed_plain_binary_is_uploaded_again(tmp):
     assert dest.manifest == {"k/blob.bin": _sig(src)}
 
 
+def test_a_changed_size_under_the_recorded_mtime_is_not_held(tmp):
+    """The signature is both fields: a rewrite that restores the recorded
+    mtime but changes the length is still not the stored bytes."""
+    dest, client, _ = _store()
+    src = _write(Path(tmp) / "wire.jsonl", "x\n" * 100, days_old=2)
+    stat = src.stat()
+    assert dest.upload_file(src, "k/wire.jsonl")
+    src.write_bytes(b"y\n" * 50)
+    os.utime(src, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert src.stat().st_mtime_ns == stat.st_mtime_ns
+    assert src.stat().st_size != stat.st_size
+    assert not dest.holds(src, "k/wire.jsonl")
+    assert dest.upload_file(src, "k/wire.jsonl")
+    assert lzma.decompress(client.objects["k/wire.jsonl.xz"]) == b"y\n" * 50
+
+
 def test_a_plain_object_with_no_recorded_signature_is_uploaded_once(tmp):
     """An object stored before plain uploads were signed: the size matches,
     so nothing proves its bytes are these. One re-upload, then signed."""

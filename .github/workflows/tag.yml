@@ -312,7 +312,8 @@ jobs:
             echo "patch version to open; set main's __version__ by hand." >&2
             exit 1
           fi
-          next="${released%.*}.$(( ${released##*.} + 1 )).dev0"
+          # 10#: bash reads a leading-zero patch number as octal.
+          next="${released%.*}.$(( 10#${released##*.} + 1 )).dev0"
           file=session_archivers/__init__.py
           old="__version__ = \"$released\""
           new="__version__ = \"$next\""

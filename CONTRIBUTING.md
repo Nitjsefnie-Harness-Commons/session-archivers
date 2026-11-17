@@ -61,8 +61,25 @@ ls requirements*.txt | xargs -n1 pip-audit -r
 # and without it zizmor runs offline with fewer audits
 pip install --require-hashes -r requirements-zizmor.txt
 GH_TOKEN="$(gh auth token)" zizmor --no-progress .github/workflows/
+
+# ci gate, aggregate job: exit 1 (no match) passes, 0 is a committed
+# merge-conflict marker, above 1 is a git grep error
+git grep -nI -E '^(<{7}( |$)|>{7}( |$)|={7}$)' -- .
 ```
 
+- `ci gate` calls `tests`, `lint`, `types`, `audit`, `codeql` and `actionlint`
+  as reusable-workflow legs on every pull request and push to `main`. Its
+  `aggregate` job is green only when every leg succeeded, or was skipped
+  because every changed path is `**/*.md`, `LICENSE` or `.gitignore`
+  (`.github/scripts/aggregate_gate.py` folds the results and names the legs
+  that decided). A called leg reports as `<leg> / <job>`, such as
+  `lint / pylint`, so `tests`, `lint`, `types` and `codeql` keep a standalone
+  pull-request run for the bare names the ruleset requires until it requires
+  `aggregate`; on their own, `audit` runs only on its daily schedule or by
+  dispatch and `actionlint` only by dispatch. Each leg keys its concurrency group on
+  `github.workflow`, so its called and standalone runs never cancel each
+  other. A new gate workflow needs `workflow_call`, a leg in `ci-gate.yml`, an
+  entry in that job's `needs` and one in the script's `LEGS`.
 - `git ls-files` sees only tracked files, so stage a new module before running
   pylint and pycodestyle: an untracked one is checked by nobody. (`git ls-files
   -co --exclude-standard` includes untracked files that are not ignored.)
@@ -76,8 +93,10 @@ GH_TOKEN="$(gh auth token)" zizmor --no-progress .github/workflows/
   and every diff attribute set in the tree, and reads `.gitleaks.toml` and
   `.gitleaksignore` only from the trusted commit: the pull request's base, the
   previous tip of `main` on a push, the scanned commit on a schedule or
-  dispatch. An allowlist or ignore entry therefore takes effect only after it
-  is on `main`. No fixture or example may carry a credential-shaped value; use
+  dispatch. An allowlist or ignore entry therefore takes effect only once the
+  trusted commit carries it: the pull request that adds it and the push that
+  lands it on `main` (whose previous tip lacks it) are both scanned without
+  it, so a finding it suppresses still fails both. No fixture or example may carry a credential-shaped value; use
   the reserved documentation values (`example.com`, `192.0.2.0/24`) for hosts
   and addresses.
 - The coverage floor is a ratchet, not a target: raise it by hand in

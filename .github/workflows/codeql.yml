@@ -41,6 +41,7 @@ jobs:
   analyze:
     name: analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     permissions:
       # Writing the analysis results is the whole point; everything else
@@ -50,12 +51,15 @@ jobs:
       contents: read
 
     strategy:
-      # Only one language here — this repo has no JS at all. The matrix
-      # stays a matrix so adding one later is a one-line change rather
-      # than a restructure.
+      # `actions` for the workflows, two of which hold `contents: write`;
+      # `python` for the package. The repo has no JS at all. matrix.language
+      # feeds the job name, `languages:` and `category:`, so each entry lands
+      # as its own check.
       fail-fast: false
       matrix:
         include:
+          - language: actions
+            build-mode: none
           - language: python
             build-mode: none
 

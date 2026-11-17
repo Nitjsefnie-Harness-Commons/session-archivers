@@ -72,9 +72,14 @@ GH_TOKEN="$(gh auth token)" zizmor --no-progress .github/workflows/
   `queue: max`, which the stock build rejects. Run `actionlint
   .github/workflows/*.yml` with that build.
 - The `secrets` workflow runs gitleaks 8.30.1 over the full history
-  (`gitleaks detect --verbose --redact`). No fixture or example may carry a
-  credential-shaped value; use the reserved documentation values (`example.com`,
-  `192.0.2.0/24`) for hosts and addresses.
+  (`gitleaks detect --verbose --redact`). It ignores a `gitleaks:allow` comment
+  and every diff attribute set in the tree, and reads `.gitleaks.toml` and
+  `.gitleaksignore` only from the trusted commit: the pull request's base, the
+  previous tip of `main` on a push, the scanned commit on a schedule or
+  dispatch. An allowlist or ignore entry therefore takes effect only after it
+  is on `main`. No fixture or example may carry a credential-shaped value; use
+  the reserved documentation values (`example.com`, `192.0.2.0/24`) for hosts
+  and addresses.
 - The coverage floor is a ratchet, not a target: raise it by hand in
   `tests.yml` as coverage climbs, and write tests rather than lower it to fit a
   result.

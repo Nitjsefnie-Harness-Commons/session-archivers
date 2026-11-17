@@ -65,6 +65,11 @@ GH_TOKEN="$(gh auth token)" zizmor --no-progress .github/workflows/
 # ci gate, aggregate job: exit 1 (no match) passes, 0 is a committed
 # merge-conflict marker, above 1 is a git grep error
 git grep -nI -E '^(<{7}( |$)|>{7}( |$)|={7}$)' -- .
+
+# ci gate, aggregate job, pull requests only: head freshness, then scopes
+export SESSION_ARCHIVERS_HEAD_SHA="$(git rev-parse HEAD)"
+python3 .github/scripts/gate_base_freshness.py
+python3 .github/scripts/commit_scopes.py
 ```
 
 - `ci gate` calls `tests`, `lint`, `types`, `audit`, `codeql` and `actionlint`
@@ -72,8 +77,12 @@ git grep -nI -E '^(<{7}( |$)|>{7}( |$)|={7}$)' -- .
   `aggregate` job is green only when every leg succeeded, or was skipped
   because every changed path is `**/*.md`, `LICENSE` or `.gitignore`
   (`.github/scripts/aggregate_gate.py` folds the results and names the legs
-  that decided). A called leg reports as `<leg> / <job>`, such as
-  `lint / pylint`, so `tests`, `lint`, `types` and `codeql` keep a standalone
+  that decided). On a pull request it is also red when freshly fetched `main`
+  holds a commit the head lacks that touches `.github/`, `requirements*.txt`,
+  `pyproject.toml`, `setup.cfg`, `.pylintrc`, `pyrightconfig.json` or
+  `run_tests.py` (rebase onto `main`), or when a commit pairs a workflow-name
+  scope with a type other than `ci`. A called leg reports as `<leg> / <job>`,
+  such as `lint / pylint`, so `tests`, `lint`, `types` and `codeql` keep a standalone
   pull-request run for the bare names the ruleset requires until it requires
   `aggregate`; on their own, `audit` runs only on its daily schedule or by
   dispatch and `actionlint` only by dispatch. Each leg keys its concurrency group on

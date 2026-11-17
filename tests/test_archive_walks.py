@@ -1456,22 +1456,22 @@ def test_codex_main_uploads_and_succeeds_while_the_db_is_locked(tmp):
 
 def test_kimi_project_map_reads_kimi_json(tmp):
     kimi_dir = Path(tmp) / "kimi"
-    _write(kimi_dir / "kimi.json",
-           json.dumps({"work_dirs": [{"path": "/p/one"}, {"path": "/p/two"},
-                                     {"no_path": True}]}))
+    paths = ("/p/one", "/p/Árvíztűrő")
+    _write(kimi_dir / "kimi.json", json.dumps(
+        {"work_dirs": [{"path": p} for p in paths] + [{"no_path": True}]}, ensure_ascii=False))
     with sandbox(_KIMI, KIMI_DIR=kimi_dir):
         mapping = _KIMI.load_project_map()
-    assert mapping[hashlib.md5(b"/p/one").hexdigest()] == "/p/one"
-    assert len(mapping) == 2
+    assert mapping == {hashlib.md5(p.encode()).hexdigest(): p for p in paths}
 
 
 def test_kimi_project_map_is_empty_without_or_with_a_corrupt_kimi_json(tmp):
     with sandbox(_KIMI, KIMI_DIR=Path(tmp) / "absent"):
         assert _KIMI.load_project_map() == {}
     kimi_dir = Path(tmp) / "kimi"
-    _write(kimi_dir / "kimi.json", "{not json")
-    with sandbox(_KIMI, KIMI_DIR=kimi_dir):
-        assert _KIMI.load_project_map() == {}
+    for body in ("{not json", b"\xff\xfe{"):
+        _write(kimi_dir / "kimi.json", body)
+        with sandbox(_KIMI, KIMI_DIR=kimi_dir):
+            assert _KIMI.load_project_map() == {}
 
 
 def test_kimi_code_workdirs_maps_the_bucket_hash_to_the_project(tmp):

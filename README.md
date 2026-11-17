@@ -135,7 +135,7 @@ python3 run_tests.py                                             # the suite
 git ls-files -co --exclude-standard '*.py' | xargs pylint        # lint
 git ls-files -co --exclude-standard '*.py' | xargs pycodestyle   # lint
 pyright                                                          # types
-pip-audit -r requirements-dev.txt -r requirements-test.txt       # audit
+pip-audit . && ls requirements*.txt | xargs -n1 pip-audit -r     # audit
 actionlint .github/workflows/*.yml && zizmor .github/workflows/  # workflows
 ```
 
@@ -188,8 +188,9 @@ branches that need an unwritable filesystem to reach.
 | --- | --- |
 | `tests` | `run_tests.py` across 3 OSes × 5 Pythons, plus a single-run coverage job — the matrix would otherwise report the same coverage number fifteen times. |
 | `lint` / `types` | pylint + pycodestyle, and pyright. |
-| `codeql` | Security analysis (Python only — no JS here). Findings go to the Security tab, never the build. Weekly cron on top of push, because a query published today would otherwise only ever run against files touched after it shipped. |
-| `audit` | `pip-audit` over both requirements files, resolving the full transitive tree. **Daily** cron: this answers "is a version we froze months ago still safe", and that answer changes with no commit here to hang it on. |
+| `codeql` | Security analysis (Python and the `actions` workflow files — no JS here). Findings go to the Security tab, never the build. Weekly cron on top of push, because a query published today would otherwise only ever run against files touched after it shipped. |
+| `audit` | `pip-audit` over the package (`pyproject.toml`) and over each root `requirements*.txt` manifest, one run per manifest, resolving the full transitive tree. **Daily** cron: this answers "is a version we froze months ago still safe", and that answer changes with no commit here to hang it on. |
+| `secrets` | `gitleaks` over the full git history, on every pull request, every push to `main`, a daily cron and manual dispatch. A finding fails the check. |
 | `actionlint` | `actionlint` + `zizmor` over the workflow YAML. A broken workflow does not go red, it silently stops running. |
 | `pr gate` | `Nitjsefnie-Actions/pr-gate`: the pull-request description against `.github/PULL_REQUEST_TEMPLATE.md`, every issue it closes assigned to its author, Conventional Commits subjects, and every commit's author and committer attributable to the pull-request author. |
 | `claim` | `Nitjsefnie-Actions/claim`: `/claim`, `/unclaim` and `/release` on an issue assign and unassign the commenter. |

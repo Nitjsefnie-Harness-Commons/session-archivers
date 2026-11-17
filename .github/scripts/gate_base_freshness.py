@@ -43,8 +43,7 @@ def main() -> int:
     if stale:
         print(f'main holds commits this head lacks that touch {paths}:')
         print(''.join(f'  {line}\n' for line in stale.decode(errors='replace').splitlines()), end='')
-        print('Rebase onto main and push again: the pull request lands by rebase, '
-              "so its own commits must carry main's gate definitions.")
+        print('Rebase onto main and push again, so a new run tests the head on main as it now stands.')
         return 1
     print(f'This head carries every commit on main that touches {paths}. '
           'A commit main gains after this run is not seen until the check runs again.')

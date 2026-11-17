@@ -8,8 +8,8 @@ Designed to run hourly via cron. Behaviour per run:
 1. Acquire single-instance lock. If a previous run still holds it, exit
    silently.
 2. For every rollout under ~/.codex/sessions/YYYY/MM/DD/, read its
-   session_meta head, derive its key, upload (skipped while the manifest
-   signature matches; idempotent).
+   session_meta head, derive its key, upload (skipped while its manifest
+   signature matches).
 3. Publish one sessions/<hash>/project.json marker per project so the
    dashboard can show a path instead of a hash.
 4. Delete a local rollout once the bucket verifiably holds it AND it

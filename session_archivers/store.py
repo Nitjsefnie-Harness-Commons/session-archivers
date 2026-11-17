@@ -86,21 +86,16 @@ def manifest_key():
 
 
 def _signature(st):
-    '''What the manifest records for a stored object: the local file's
-    `[mtime_ns, size]` when it was stored (a list, as JSON reads it back).'''
+    '''The manifest's record of a stored file: a list, as JSON reads it back.'''
     return [st.st_mtime_ns, st.st_size]
 
 
 def _stored_forms(key):
-    '''Every key `upload_file(path, key)` can store under: an already-.xz
-    input verbatim, anything else compressed or plain.'''
+    '''Every key `upload_file` can store `key` under.'''
     return (key,) if key.endswith('.xz') else (key + '.xz', key)
 
 
 def _dir_keys(local_dir, prefix):
-    '''(path, key) for every file under `local_dir`, keyed by its
-    POSIX-spelled relative path so the keys are identical whichever OS
-    uploaded them.'''
     for path in local_dir.rglob('*'):
         if path.is_file():
             yield path, f'{prefix}/{path.relative_to(local_dir).as_posix()}'
@@ -203,17 +198,14 @@ class Store:
         self.log(f'manifest saved: {key} ({len(self.manifest):,} entries)')
 
     def holds(self, local_path, key):
-        '''True when the bucket holds an object stored from THIS file as it
-        is now, under `key` in either storage form.
+        '''True when the bucket holds `key`, in either storage form, as
+        stored from THIS file as it is now: its manifest signature is the
+        file's present `[mtime_ns, size]` (see the module docstring).
 
         The check a retention gate makes before deleting a local file: a
-        failed upload must never take the only copy with it, and an object
-        of the same size may still hold older bytes. So a stored form counts
-        only while the manifest records this file's present `[mtime_ns,
-        size]` signature for it (see the module docstring).
-        A file that vanished proves nothing and reads False. In a dry
-        run, a key this run reported it would upload counts too, so the
-        preview shows the deletions a real run would make.
+        failed upload must never take the only copy with it. A vanished
+        file reads False. A dry run also counts a key it reported it would
+        upload, so the preview shows a real run's deletions.
         '''
         try:
             st = local_path.stat()
@@ -235,9 +227,8 @@ class Store:
     def upload_file(self, local_path, key):
         '''Upload `local_path` under `key`. True when an upload happened.
 
-        Skips when a stored form of `key` carries this file's current
-        manifest signature; a size match alone never skips. The stale twin
-        is deleted whenever the chosen form flips.
+        Skips while a stored form carries this file's signature, never on
+        size alone. The stale twin is deleted whenever the chosen form flips.
         '''
         try:
             st = local_path.stat()
@@ -267,11 +258,8 @@ class Store:
         return True
 
     def _preview(self, key, size):
-        '''The dry-run line for a key `upload_file` would compress or not.
-
-        Only text is always xz; for anything else the form is decided by
-        compressing it, which a preview does not do.
-        '''
+        '''Only text is always xz; any other form is decided by compressing,
+        which a preview skips.'''
         self._planned.add(key)
         if is_text(key):
             self.log(f'  DRY upload {key}.xz ({size:,} B uncompressed; '
@@ -310,8 +298,8 @@ class Store:
 
         For inputs that are already compressed — re-compressing would
         double-wrap them — and for the manifest, which is read back as plain
-        JSON and must never be xz'd. The manifest passes no `sig`: it records
-        no signature for itself, so it is written every time it is asked.
+        JSON and must never be xz'd. The manifest passes no `sig`, so it is
+        written every time.
         '''
         if self.dry_run:
             self.log(f'  DRY upload {key} ({st.st_size:,} B)')

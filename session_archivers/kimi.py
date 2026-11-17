@@ -9,7 +9,8 @@ Behaviour per run:
 2. Sweep kimi-local stale paths (files older than DAYS):
    ~/.kimi/logs/*, ~/.kimi/telemetry/*
 3. For every session under ~/.kimi/sessions/<session_hash>/<uuid>/:
-   upload every file (size-skip, idempotent), then delete locally
+   upload every file (skipped while the manifest signature matches;
+   idempotent), then delete locally
    if the wire.jsonl mtime > DAYS.
 4. Archive ~/.kimi/user-history/<session_hash>.jsonl files.
 5. Archive ~/.kimi-code/sessions/<wd_slug_hash>/<session-id>/ files,
@@ -371,7 +372,7 @@ def main():
         log(f'remote inventory: {len(dest.inventory()):,} objects '
             f'in bucket {BUCKET!r}')
         log(f'manifest {store.manifest_key()}: '
-            f'{len(dest.load_manifest()):,} known compressed objects')
+            f'{len(dest.load_manifest()):,} known stored objects')
 
         up_sess, del_sess, fail_sess = archive_sessions(dest, cutoff)
         up_hist, del_hist, fail_hist = archive_user_history(dest, cutoff)

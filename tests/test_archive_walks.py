@@ -1499,19 +1499,10 @@ def test_kimi_workdir_falls_back_to_the_session_state(tmp):
         "homedir": "/h/proj/sessions/wd_p_0123456789ab/ses_1/agents/main"}}}))
     assert _KIMI._workdir_from_state(session) == "/h/proj"
     assert _KIMI._workdir_from_state(Path(tmp) / "no-session") is None
-
-    broken = Path(tmp) / "broken"
-    _write(broken / "state.json", "{not json")
-    assert _KIMI._workdir_from_state(broken) is None
-
-    empty = Path(tmp) / "empty"
-    _write(empty / "state.json", json.dumps({"agents": {"main": {}}}))
-    assert _KIMI._workdir_from_state(empty) is None
-
-    odd = Path(tmp) / "odd"
-    _write(odd / "state.json",
-           json.dumps({"agents": {"main": {"homedir": "/somewhere/else"}}}))
-    assert _KIMI._workdir_from_state(odd) is None
+    for name, body in (("broken", "{not json"), ("empty", '{"agents": {"main": {}}}'),
+                       ("odd", '{"agents": {"main": {"homedir": "/somewhere/else"}}}')):
+        _write(Path(tmp) / name / "state.json", body)
+        assert _KIMI._workdir_from_state(Path(tmp) / name) is None, name
 
 
 def test_kimi_archives_a_legacy_session_and_its_project_marker(tmp):
@@ -1531,7 +1522,6 @@ def test_kimi_deletes_a_stale_legacy_session_and_prunes_the_hash_dir(tmp):
     _write(uuid_dir / "wire.jsonl", '{"a": 1}\n', days_old=10)
     dest, _, said = _dest()
     assert _legacy_walk(tmp, dest, _cutoff()) == (1, 1, 0)
-    assert not uuid_dir.exists()
     assert not uuid_dir.parent.exists()
     assert not any(_KEPT in line for line in said), said
 
@@ -1653,6 +1643,8 @@ def _kimi_code_session(kc, bucket, session, workdir=None):
         state["agents"]["main"]["homedir"] = (
             f"{workdir}/sessions/{bucket}/{session}/agents/main")
     _write(sess / "state.json", json.dumps(state))
+    for rel in ("agents/main/plans/p1.md", "tasks/t1/output.log", "upcoming-goals.json"):
+        _write(sess / rel, "x\n")
     return sess
 
 
@@ -1663,6 +1655,9 @@ _KC_KEYS = (  # (kind, key, the marker its failed upload logs)
     ("blob", "sessions/0123456789ab/ses_1/subagents/agent-1/blobs/shot.json.xz",
      "blobs="),
     ("state", "sessions/0123456789ab/ses_1/state.json.xz", "state="),
+    ("plan", "sessions/0123456789ab/ses_1/agents/main/plans/p1.md", "file="),
+    ("task log", "sessions/0123456789ab/ses_1/tasks/t1/output.log", "file="),
+    ("goals", "sessions/0123456789ab/ses_1/upcoming-goals.json.xz", "file="),
 )
 
 
@@ -1682,14 +1677,9 @@ def test_kimi_code_sessions_map_onto_the_legacy_key_layout(tmp):
     kc = Path(tmp) / "kimi-code"
     _kimi_code_session(kc, "wd_proj_0123456789ab", "ses_1", workdir="/h/proj")
     dest, client, _ = _dest()
-    assert _kc_walk(kc, dest, _cutoff()) == (5, 0, 0)
-    assert sorted(client.objects) == [
-        "sessions/0123456789ab/project.json",
-        "sessions/0123456789ab/ses_1/state.json.xz",
-        "sessions/0123456789ab/ses_1/subagents/agent-1/blobs/shot.json.xz",
-        "sessions/0123456789ab/ses_1/subagents/agent-1/wire.jsonl.xz",
-        "sessions/0123456789ab/ses_1/wire.jsonl.xz",
-    ]
+    assert _kc_walk(kc, dest, _cutoff()) == (len(_KC_KEYS) + 1, 0, 0)
+    assert sorted(client.objects) == sorted(
+        ["sessions/0123456789ab/project.json", *(key for _, key, _ in _KC_KEYS)])
     assert json.loads(client.objects["sessions/0123456789ab/project.json"]) == {
         "path": "/h/proj"}
 
@@ -1734,10 +1724,9 @@ def test_kimi_code_deletes_a_stale_session_and_prunes_the_bucket(tmp):
     kc = Path(tmp) / "kimi-code"
     sess = _old_kimi_code_session(kc)
     dest, client, said = _dest()
-    assert _kc_walk(kc, dest, _cutoff()) == (4, 1, 0)
+    assert _kc_walk(kc, dest, _cutoff()) == (len(_KC_KEYS), 1, 0)
     assert sorted(client.objects) == sorted(key for _, key, _ in _KC_KEYS)
-    assert not sess.exists()
-    assert not (kc / "sessions" / "wd_p_0123456789ab").exists()
+    assert not sess.parent.exists()
     assert not any(_KEPT in line for line in said), said
 
 
@@ -1745,7 +1734,7 @@ def test_kimi_code_dry_run_keeps_the_session(tmp):
     kc = Path(tmp) / "kimi-code"
     sess = _old_kimi_code_session(kc)
     dest, client, said = _dest(dry_run=True)
-    assert _kc_walk(kc, dest, _cutoff()) == (4, 1, 0)
+    assert _kc_walk(kc, dest, _cutoff()) == (len(_KC_KEYS), 1, 0)
     assert client.puts == []
     assert sess.exists()
     assert any("DRY rmtree" in line for line in said)
@@ -1757,20 +1746,20 @@ def test_kimi_code_counts_a_failed_marker_upload(tmp):
     dest, client, said = _dest()
     client.fail_puts.add("sessions/0123456789ab/project.json")
     uploaded, _, failed = _kc_walk(kc, dest, _cutoff(1))
-    assert (uploaded, failed) == (4, 1)
+    assert (uploaded, failed) == (len(_KC_KEYS), 1)
     assert any("marker upload failed" in line for line in said)
 
 
 def test_kimi_code_keeps_a_stale_session_whose_upload_failed(tmp):
-    """A transcript that never reached the bucket is the only copy. Main
-    wire, subagent wire, blobs and state each fail on their own leg."""
+    """A file that never reached the bucket is the only copy. Each leg and
+    each file outside them fails on its own."""
     for index, (kind, key, marker) in enumerate(_KC_KEYS):
         kc = Path(tmp) / f"kimi-code-{index}"
         sess = _old_kimi_code_session(kc)
         before = _kc_files(sess)
         dest, client, said = _dest()
         client.fail_puts.add(key)
-        assert _kc_walk(kc, dest, _cutoff()) == (3, 0, 1), kind
+        assert _kc_walk(kc, dest, _cutoff()) == (len(_KC_KEYS) - 1, 0, 1), kind
         assert any(marker in line for line in said), kind
         assert key not in client.objects, kind
         assert _kc_files(sess) == before, kind
@@ -1783,9 +1772,9 @@ def test_kimi_code_keeps_a_stale_session_whose_upload_was_skipped(tmp):
         kc = Path(tmp) / f"kimi-code-{index}"
         sess = _old_kimi_code_session(kc)
         before = _kc_files(sess)
-        dest, client, said = _skipping_dest(key[:-len(".xz")])
-        assert _kc_walk(kc, dest, _cutoff()) == (3, 0, 0), kind
-        assert dest.skipped == [key[:-len(".xz")]], kind
+        dest, client, said = _skipping_dest(key.removesuffix(".xz"))
+        assert _kc_walk(kc, dest, _cutoff()) == (len(_KC_KEYS) - 1, 0, 0), kind
+        assert dest.skipped == [key.removesuffix(".xz")], kind
         assert key not in client.objects, kind
         assert _kc_files(sess) == before, kind
         assert any(_KEPT in line and str(sess) in line for line in said), kind
@@ -1796,12 +1785,23 @@ def test_kimi_code_keeps_a_session_when_only_one_of_two_blobs_is_held(tmp):
     sess = _old_kimi_code_session(kc)
     other = _write(sess / "agents" / "agent-1" / "blobs" / "other.json", "{}")
     dest, client, said = _skipping_dest("blobs/other.json")
-    assert _kc_walk(kc, dest, _cutoff()) == (4, 0, 0)
+    assert _kc_walk(kc, dest, _cutoff()) == (len(_KC_KEYS), 0, 0)
     assert dest.skipped == ["sessions/0123456789ab/ses_1/subagents/agent-1/"
                             "blobs/other.json"]
     assert any(key.endswith("blobs/shot.json.xz") for key in client.objects)
     assert sess.exists() and other.exists()
     assert any(_KEPT in line for line in said), said
+
+
+def test_kimi_code_never_uploads_or_deletes_a_wire_no_leg_archives(tmp):
+    """A reader takes any wire.jsonl key for a transcript; one nested below
+    `agents/<agent>/` gets none, so its session stays."""
+    sess = _old_kimi_code_session(Path(tmp) / "kc")
+    nested = _write(sess / "agents/main/deep/wire.jsonl", "{}\n", days_old=10)
+    dest, client, said = _dest()
+    assert _kc_walk(Path(tmp) / "kc", dest, _cutoff()) == (len(_KC_KEYS), 0, 0)
+    assert sorted(client.objects) == sorted(key for _, key, _ in _KC_KEYS)
+    assert nested.exists() and any(_KEPT in line for line in said), said
 
 
 def test_kimi_cleanup_sweeps_logs_and_telemetry(tmp):
@@ -1842,7 +1842,7 @@ def test_kimi_main_archives_all_three_sources(tmp):
     assert "user-history/hash1.jsonl.xz" in client.objects
     assert "sessions/0123456789ab/ses_1/wire.jsonl.xz" in client.objects
     assert _STORE.manifest_key() in client.objects
-    assert "done — uploaded=6 deleted=0 failures=0" in out
+    assert "done — uploaded=9 deleted=0 failures=0" in out
 
 
 def test_kimi_main_returns_one_when_an_upload_failed(tmp):

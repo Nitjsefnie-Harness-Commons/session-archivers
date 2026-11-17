@@ -967,8 +967,10 @@ def test_codex_finds_every_rollout_under_the_date_buckets(tmp):
     with sandbox(_CODEX, SESSIONS_DIR=sessions, ARCHIVED_SESSIONS_DIR=absent):
         found = _CODEX.find_rollouts()
     assert [p.parent.name for p in found] == ["20", "21"]
-    with sandbox(_CODEX, SESSIONS_DIR=absent, ARCHIVED_SESSIONS_DIR=absent):
-        assert _CODEX.find_rollouts() == []
+    # No sessions/ at all still finds what archived_sessions/ holds.
+    archived = _write(Path(tmp) / "archived" / "rollout-x.jsonl", "{}\n")
+    with sandbox(_CODEX, SESSIONS_DIR=absent, ARCHIVED_SESSIONS_DIR=archived.parent):
+        assert _CODEX.find_rollouts() == [archived]
 
 
 def test_codex_archives_a_main_rollout_under_its_thread_id(tmp):

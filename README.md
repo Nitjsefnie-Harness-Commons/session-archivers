@@ -201,7 +201,7 @@ branches that need an unwritable filesystem to reach.
 | `pin test screen` | `Nitjsefnie-Actions/pin-guard`: comments on test lines that assert a pinned dependency version, tag, SHA or digest. |
 | `comment share` | `Nitjsefnie-Actions/comment-ratchet`: a pull request may not raise a tracked file's comment share above 15%, or above its record in `.github/comment-share.json`. |
 | `size baseline` | `Nitjsefnie-Actions/size-ratchet`: per-file line ceilings and the `tests/` line total, recorded in `.github/size-baseline.json`. |
-| `tag` | Watches `session_archivers/__init__.py`. When `__version__` changes on `main`, it waits for every other check on that commit and then pushes `v<version>`. |
+| `tag` | Watches `session_archivers/__init__.py`. When `__version__` on `main` is a release version `X.Y.Z` (never a `.devN` one), it waits for the named gates (`pycodestyle`, `pylint`, `pyright`, `pip-audit`, `analyze`, `suites`, `wheel`, `coverage`) to pass and every other check on that commit to end `success`, `skipped` or `neutral`, pushes `vX.Y.Z`, starts `release`, then commits `X.Y.(Z+1).dev0` to `main`. |
 | `release` | Fires on that tag: runs every suite, builds the wheel, and publishes `SHA256SUMS` beside it. |
 
 **There is deliberately no speed gate here**, unlike the dashboard repos.
@@ -210,9 +210,15 @@ helper arguments, which pytest reads as fixture requests — and the
 comparator needs `--junitxml`, which only pytest emits. Rather than
 reshape the tests to suit a gate, the gate is omitted.
 
-**Releasing = bumping `__version__`.** `tag` creates the tag, `release`
-publishes from it. Nothing bumps the version automatically: deciding
-patch-vs-minor is a judgement about what changed.
+**Releasing = one commit setting `__version__` to the release version.**
+Between releases `main` carries a development version, `X.Y.Z.devN`,
+which `tag` never tags. The commit that sets it to a release version
+`X.Y.Z` is the release; choosing patch, minor or major stays a judgement
+about what changed. `tag` waits for the named gates on that commit, tags
+it, starts `release`, which publishes from the tag, and then commits
+`X.Y.(Z+1).dev0` to `main`, so no later commit claims a published
+version. If that last push is refused because `main` moved, re-run the
+failed `bump` job.
 
 **Actions are hash-pinned**, with the version in a trailing comment. Do
 not "tidy" one back to `@v4`: a tag is a moving pointer, and these jobs

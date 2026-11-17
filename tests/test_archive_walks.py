@@ -401,7 +401,8 @@ def test_claude_keeps_a_session_a_route_left_unverified(tmp):
             ("multi data", multi, _ZAI_BUCKET, "p/u/data/out.txt"),
             ("multi, first route", multi, _BUCKET, "p/u/u.jsonl"),
             ("orphan", glm, _ZAI_BUCKET, "p/u/data/out.txt"),
-            ("multi orphan", multi, _ZAI_BUCKET, "p/u/data/out.txt")):
+            ("multi orphan", multi, _ZAI_BUCKET, "p/u/data/out.txt"),
+            ("multi orphan, first route", multi, _BUCKET, "p/u/data/out.txt")):
         home = Path(tmp) / label
         session = home / "projects" / "p" / "u"
         if "orphan" in label:

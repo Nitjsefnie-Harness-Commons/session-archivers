@@ -6,14 +6,13 @@ name: codeql
 # Security tab rather than turning the build red, so a new query shipping
 # upstream cannot block an unrelated push.
 #
-# TRIGGER DIFFERS FROM THE OTHER WORKFLOWS ON PURPOSE. The rest of the
-# suite builds on `pull_request_review` once an approving review lands.
-# CodeQL does not, because `analyze` uploads its SARIF against the ref and
-# SHA of the *event*, while our checkout step deliberately takes
-# `pull_request.head.sha`. On a review event those two are different
-# commits, so the alerts would be filed against a tree that was never the
-# one analysed. `push` fires on every branch in this repo, which already
-# covers the head of any same-repo PR, so nothing is actually lost.
+# `push` is limited to main: a same-repo pull request head already runs on
+# the `pull_request` event, and an unfiltered `push` would schedule the same
+# commit a second time under another ref, which the `concurrency` group
+# (keyed on the ref) cannot fold. Both events check out the event's own
+# commit (the merge commit, on a pull request) and `analyze` uploads its
+# SARIF against that same ref and SHA, so alerts always describe the tree
+# that was analysed.
 #
 # The weekly cron is not redundant with push: CodeQL's query packs are
 # updated continuously, and a new query only ever runs against code that
@@ -22,6 +21,7 @@ name: codeql
 
 on:
   push:
+    branches: [main]
     paths-ignore:
       - '**/*.md'
       - 'LICENSE'

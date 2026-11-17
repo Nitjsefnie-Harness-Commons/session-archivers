@@ -9,18 +9,17 @@ Behaviour per run:
 2. Sweep kimi-local stale paths (files older than DAYS):
    ~/.kimi/logs/*, ~/.kimi/telemetry/*
 3. For every session under ~/.kimi/sessions/<session_hash>/<uuid>/:
-   upload every file (skipped while the manifest signature matches;
-   idempotent), then delete locally
-   if the wire.jsonl mtime > DAYS and the bucket verifiably holds every
-   file uploaded.
-4. Archive ~/.kimi/user-history/<session_hash>.jsonl files, deleting a stale
-   one only once the bucket verifiably holds it.
+   upload every file (skipped while its manifest signature matches), then
+   delete locally if the wire.jsonl mtime > DAYS.
+4. Archive ~/.kimi/user-history/<session_hash>.jsonl files.
 5. Archive ~/.kimi-code/sessions/<wd_slug_hash>/<session-id>/ files,
    mapping agents/main/wire.jsonl -> sessions/<hash>/<uuid>/wire.jsonl and
    agents/<agent-N>/wire.jsonl -> sessions/<hash>/<uuid>/subagents/<agent-N>/wire.jsonl.
-   A stale session dir goes only once the bucket verifiably holds every
-   wire, subagent blob and state.json the walk uploads.
 6. Log a one-liner summary to ~/.kimi-code/archive-sessions.log.
+
+Steps 3-5 delete a stale path only once the bucket verifiably holds
+everything the walk uploads from it (Kimi-Code: every wire, subagent blob
+and state.json).
 
 Only the WALKS are here. The destination — key layout, compression policy,
 manifest, inventory — lives in store.py, and the host-side scaffolding —
@@ -199,8 +198,7 @@ def archive_kimi_code_sessions(dest, cutoff):
             r2_prefix = f'sessions/{session_hash}/{session_dir.name}'
             agents_dir = session_dir / 'agents'
 
-            # What the walk uploads, for the delete gate: (path, key) files
-            # and (dir, prefix) trees.
+            # What the walk uploads, for the delete gate.
             files = []
             trees = []
 

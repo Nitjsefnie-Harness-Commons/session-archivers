@@ -307,7 +307,8 @@ jobs:
         # ssh-keyscan trusts any answer.
         run: |
           released="${TAG#v}"
-          # At most 18 patch digits, so the +1 below cannot overflow 64 bits.
+          # At most 18 patch digits, so neither reading the patch nor the +1
+          # wraps 64 bits; the check after them cannot see a wrapped read.
           if ! echo "$released" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]{1,18}$'; then
             echo "Tagged $TAG, which is not X.Y.Z with a patch of at most" >&2
             echo "18 digits, so there is no next patch version to open;" >&2
@@ -319,7 +320,7 @@ jobs:
           next_patch=$(( patch + 1 ))
           next="${released%.*}.$next_patch.dev0"
           if ! echo "$next" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.dev0$' \
-            || [ "$next_patch" -le "$patch" ]; then
+            || ! [ "$next_patch" -gt "$patch" ]; then
             echo "Computed '$next' from $released, which is not a higher" >&2
             echo "X.Y.Z.dev0; nothing committed. Set main's __version__ by hand." >&2
             exit 1

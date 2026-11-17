@@ -307,13 +307,23 @@ jobs:
         # ssh-keyscan trusts any answer.
         run: |
           released="${TAG#v}"
-          if ! echo "$released" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Tagged $TAG, which is not X.Y.Z, so there is no next" >&2
-            echo "patch version to open; set main's __version__ by hand." >&2
+          # At most 18 patch digits, so the +1 below cannot overflow 64 bits.
+          if ! echo "$released" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]{1,18}$'; then
+            echo "Tagged $TAG, which is not X.Y.Z with a patch of at most" >&2
+            echo "18 digits, so there is no next patch version to open;" >&2
+            echo "set main's __version__ by hand." >&2
             exit 1
           fi
           # 10#: bash reads a leading-zero patch number as octal.
-          next="${released%.*}.$(( 10#${released##*.} + 1 )).dev0"
+          patch=$(( 10#${released##*.} ))
+          next_patch=$(( patch + 1 ))
+          next="${released%.*}.$next_patch.dev0"
+          if ! echo "$next" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.dev0$' \
+            || [ "$next_patch" -le "$patch" ]; then
+            echo "Computed '$next' from $released, which is not a higher" >&2
+            echo "X.Y.Z.dev0; nothing committed. Set main's __version__ by hand." >&2
+            exit 1
+          fi
           file=session_archivers/__init__.py
           old="__version__ = \"$released\""
           new="__version__ = \"$next\""

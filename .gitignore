@@ -69,6 +69,7 @@
 !/.github/workflows/lint.yml
 !/.github/workflows/pin-guard.yml
 !/.github/workflows/pr-gate.yml
+!/.github/workflows/ratchet-push.yml
 !/.github/workflows/release.yml
 !/.github/workflows/secrets.yml
 !/.github/workflows/size-baseline.yml

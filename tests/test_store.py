@@ -1,8 +1,7 @@
 """The destination: compression policy, manifest, inventory, upload forms.
 
-This is the code the three archivers used to carry three identical copies of,
-so the suite that covered it ran every assertion three times over and proved
-one thing three times. One implementation, one suite.
+The three archivers once carried a copy each, and a suite that proved one
+thing three times. One implementation, one suite.
 
 It never reaches the network. `store.client()` is the only place a real boto3
 client is built, and nothing here calls it: every test constructs a `Store`
@@ -24,7 +23,6 @@ import json
 import lzma
 import os
 import socket
-import time
 from pathlib import Path
 
 import _util
@@ -42,24 +40,12 @@ def _store(client=None, dry_run=False, log=None):
     return _STORE.Store(client, _BUCKET, said.append, dry_run), client, said
 
 
-def _write(path, data, days_old=None):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(data, str):
-        data = data.encode("utf-8")
-    path.write_bytes(data)
-    if days_old is not None:
-        old = time.time() - days_old * 86400
-        os.utime(path, (old, old))
-    return path
+_write = _util.write
 
 
 def _incompressible(n):
-    """`n` bytes xz cannot shrink -- chained sha256, so it is reproducible.
-
-    The binary leg of the compression policy only runs when compression
-    genuinely fails to help, and high-entropy data is the only way to get
-    there without depending on a particular lzma version's ratio.
-    """
+    """`n` bytes xz cannot shrink, reproducibly: high entropy reaches the
+    binary leg without depending on one lzma version's ratio."""
     out = bytearray()
     seed = b"session-archivers"
     while len(out) < n:
@@ -70,31 +56,26 @@ def _incompressible(n):
 
 # --- content-type classification ---------------------------------------------
 
-def test_is_text_accepts_the_suffixes_the_archivers_upload(tmp):
+def test_is_text_accepts_the_suffixes_the_archivers_upload_and_no_other(tmp):
+    """Suffix-anchored: `.jsonl` inside a name is not a `.jsonl` file."""
     for key in ("sessions/a/wire.jsonl", "x.txt", "y.json", "z.js"):
         assert _STORE.is_text(key), key
-
-
-def test_is_text_rejects_everything_else(tmp):
-    for key in ("archive.tar.gz", "image.png", "wire.jsonl.xz", "noext"):
+    for key in ("archive.tar.gz", "image.png", "wire.jsonl.xz", "noext",
+                "a.jsonl.bak", "notes-about-json"):
         assert not _STORE.is_text(key), key
-
-
-def test_is_text_is_suffix_anchored_not_substring(tmp):
-    """`.jsonl` inside a name is not a `.jsonl` file."""
-    assert not _STORE.is_text("a.jsonl.bak")
-    assert not _STORE.is_text("notes-about-json")
 
 
 # --- machine identity ----------------------------------------------------------
 
 def test_machine_hash_is_stable_and_opaque(tmp):
-    """Opaque because the manifest object name must not leak the hostname."""
+    """Opaque because the manifest object name must not leak the hostname;
+    per machine, so N machines write N manifests and never clobber each other."""
     first = _STORE.machine_hash()
     assert first == _STORE.machine_hash()
     assert len(first) == 16
     assert all(c in "0123456789abcdef" for c in first)
     assert socket.gethostname() not in first
+    assert _STORE.manifest_key() == f"{_STORE.MANIFEST_PREFIX}/{first}.json"
 
 
 def test_machine_hash_falls_back_to_the_hostname(tmp):
@@ -115,14 +96,6 @@ def test_machine_hash_falls_back_to_the_hostname(tmp):
     expected = hashlib.sha256(
         socket.gethostname().encode("utf-8")).hexdigest()[:16]
     assert value == expected
-
-
-def test_manifest_key_is_per_machine_and_under_the_manifest_prefix(tmp):
-    """N machines write N manifests and never clobber each other."""
-    key = _STORE.manifest_key()
-    assert key.startswith(_STORE.MANIFEST_PREFIX + "/")
-    assert key.endswith(".json")
-    assert key[len(_STORE.MANIFEST_PREFIX) + 1:-len(".json")] == _STORE.machine_hash()
 
 
 # --- credential resolution -----------------------------------------------------
@@ -168,13 +141,11 @@ class _Deployment:
 
 
 def test_r2_config_returns_the_configured_triple(tmp):
+    """Falling back to the Cloudflare account: the R2 bucket lives in that
+    account, so one value, not two that drift."""
     with _Deployment(tmp, R2_ACCOUNT_ID="acct-1", R2_ACCESS_KEY_ID="ak",
                      R2_SECRET_ACCESS_KEY="sk"):
         assert _STORE.r2_config() == ("acct-1", "ak", "sk")
-
-
-def test_r2_config_falls_back_to_the_cloudflare_account(tmp):
-    """The R2 bucket lives in that account: one value, not two that drift."""
     with _Deployment(tmp, CLOUDFLARE_ACCOUNT_ID="cf-acct",
                      R2_ACCESS_KEY_ID="ak", R2_SECRET_ACCESS_KEY="sk"):
         assert _STORE.r2_config()[0] == "cf-acct"
@@ -212,86 +183,46 @@ def test_a_store_only_ever_touches_the_bucket_it_was_given(tmp):
     dest.save_manifest()
     assert set(client.objects) == {"sessions/h/project.json",
                                    _STORE.manifest_key()}
-
-
-def test_two_stores_over_one_client_stay_in_their_own_buckets(tmp):
-    """Nothing in Store is module-level, so two can coexist in one process."""
+    # Nothing in Store is module-level, so two can coexist in one process.
     claude_client = _util.FakeS3("claude")
-    kimi_client = _util.FakeS3("kimi")
     _STORE.Store(claude_client, "claude", [].append).upload_bytes(b"a", "k")
-    _STORE.Store(kimi_client, "kimi", [].append).upload_bytes(b"bb", "k")
-    assert claude_client.objects == {"k": b"a"}
-    assert kimi_client.objects == {"k": b"bb"}
+    dest.upload_bytes(b"bb", "k")
+    assert (claude_client.objects, client.objects["k"]) == ({"k": b"a"}, b"bb")
 
 
 # --- manifest round-trip --------------------------------------------------------
 
 def test_manifest_saves_and_loads_back_the_same_entries(tmp):
-    """The manifest is how a compressed object is recognised as up to date."""
+    """The manifest is how a stored object is recognised as up to date. A
+    reader fetches it with get_object and json.loads, nothing else."""
     dest, client, _ = _store()
     dest.manifest = {"a/b.jsonl.xz": [1234567890, 42]}
     dest.save_manifest()
-    assert _STORE.manifest_key() in client.objects
+    assert json.loads(client.objects[_STORE.manifest_key()]) == {
+        "a/b.jsonl.xz": [1234567890, 42]}
     assert dest.load_manifest() == {"a/b.jsonl.xz": [1234567890, 42]}
 
 
-def test_the_manifest_is_stored_as_plain_json_never_compressed(tmp):
-    """A reader fetches it with get_object and json.loads, nothing else."""
-    dest, client, _ = _store()
-    dest.manifest = {"k": [1, 2]}
-    dest.save_manifest()
-    assert json.loads(client.objects[_STORE.manifest_key()]) == {"k": [1, 2]}
-
-
-def test_an_absent_manifest_reads_as_empty_not_an_error(tmp):
-    """First run on a new machine: no manifest object exists yet."""
-    dest, _, _ = _store()
-    assert dest.load_manifest() == {}
-
-
-def test_a_corrupt_manifest_reads_as_empty(tmp):
-    """A truncated object costs one re-upload, not the whole run."""
-    dest, client, _ = _store()
-    client.objects[_STORE.manifest_key()] = b"{not json"
-    assert dest.load_manifest() == {}
-
-
-def test_a_manifest_of_the_wrong_shape_reads_as_empty(tmp):
-    """A JSON list parses fine and would break every .get() downstream."""
-    dest, client, _ = _store()
-    client.objects[_STORE.manifest_key()] = b'["a", "b"]'
-    assert dest.load_manifest() == {}
-
-
-def test_a_dry_run_save_puts_nothing(tmp):
-    dest, client, said = _store(dry_run=True)
-    dest.manifest = {"k": [1, 2]}
-    dest.save_manifest()
-    assert client.puts == []
-    assert any("DRY put manifest" in line for line in said)
+def test_an_absent_corrupt_or_wrong_shape_manifest_reads_as_empty(tmp):
+    """None yet on a new machine; a truncated object costs one re-upload, not
+    the whole run; a JSON list parses and would break every .get()."""
+    for body in (None, b"{not json", b'["a", "b"]'):
+        dest, client, _ = _store()
+        if body is not None:
+            client.objects[_STORE.manifest_key()] = body
+        assert dest.load_manifest() == {}, body
 
 
 # --- inventory -------------------------------------------------------------------
 
-def test_inventory_returns_every_key_with_its_stored_size(tmp):
-    dest, client, _ = _store(_util.FakeS3(_BUCKET, page_size=2))
-    client.objects = {"a": b"1", "b": b"22", "c": b"333"}
-    assert dest.inventory() == {"a": 1, "b": 2, "c": 3}
-    assert dest.remote == {"a": 1, "b": 2, "c": 3}
-
-
-def test_inventory_spans_every_page(tmp):
+def test_inventory_returns_every_key_with_its_stored_size_from_every_page(tmp):
     """One page holds 1000 keys on R2; a real bucket is many pages."""
+    assert _store()[0].inventory() == {}
     dest, client, _ = _store(_util.FakeS3(_BUCKET, page_size=3))
     client.objects = {f"k{i:03d}": b"x" * (i + 1) for i in range(10)}
-    remote = dest.inventory()
-    assert len(remote) == 10
-    assert remote["k009"] == 10
-
-
-def test_the_inventory_of_an_empty_bucket_is_an_empty_dict(tmp):
-    dest, _, _ = _store()
-    assert dest.inventory() == {}
+    expected = {f"k{i:03d}": i + 1 for i in range(10)}
+    assert dest.inventory() == expected
+    assert dest.remote == expected
 
 
 def _sig(path):
@@ -300,7 +231,6 @@ def _sig(path):
 
 
 def test_holds_recognises_every_storage_form_of_the_current_bytes(tmp):
-    """The check a retention gate makes before deleting the local copy."""
     dest, client, _ = _store()
     text = _write(Path(tmp) / "text.jsonl", "x\n" * 100)
     plain = _write(Path(tmp) / "plain.bin", _incompressible(4096))
@@ -312,183 +242,103 @@ def test_holds_recognises_every_storage_form_of_the_current_bytes(tmp):
         assert dest.holds(src, key), key
     assert sorted(client.objects) == ["a/old.jsonl.xz", "a/plain.bin",
                                       "a/text.jsonl.xz"]
+    client.fail_puts.add("a/failed.bin")
+    failed = _write(Path(tmp) / "failed.bin", b"NEW!")
+    try:
+        dest.upload_file(failed, "a/failed.bin")
+    except RuntimeError as e:
+        assert "put refused: a/failed.bin" in str(e)
+    else:
+        raise AssertionError("the injected put failure never fired")
+    assert not dest.holds(failed, "a/failed.bin"), "a failed upload is never held"
 
 
-def test_holds_is_false_for_a_same_size_object_with_other_bytes(tmp):
-    """The object is there and the size matches, but it holds older bytes:
-    deleting the local file on that evidence would lose the update."""
+def test_holds_needs_the_object_and_the_signature_of_the_current_bytes(tmp):
+    """Same size is not same bytes; a manifest entry alone is no proof (the
+    object may since have been deleted remotely); a vanished file has
+    nothing to compare against."""
     dest, _, _ = _store()
     plain = _write(Path(tmp) / "plain.bin", b"NEW!", days_old=1)
     text = _write(Path(tmp) / "text.jsonl", "{}\n", days_old=1)
     dest.remote = {"a/plain.bin": 4, "a/text.jsonl.xz": 3}
-    assert not dest.holds(plain, "a/plain.bin")  # no signature recorded
-    assert not dest.holds(text, "a/text.jsonl")
-    stale = [_sig(plain)[0] - 1, 4]
-    dest.manifest = {"a/plain.bin": stale,
+    assert not dest.holds(plain, "a/plain.bin"), "same size, no signature"
+    assert not dest.holds(text, "a/text.jsonl"), "same size, no signature"
+    dest.manifest = {"a/plain.bin": [_sig(plain)[0] - 1, 4],
                      "a/text.jsonl.xz": [_sig(text)[0] - 1, 3]}
-    assert not dest.holds(plain, "a/plain.bin")  # signature of older bytes
-    assert not dest.holds(text, "a/text.jsonl")
-
-
-def test_holds_needs_the_object_as_well_as_its_signature(tmp):
-    """A manifest entry alone is no proof: the object may have been deleted
-    remotely since, and the inventory is what this run saw."""
-    dest, _, _ = _store()
-    plain = _write(Path(tmp) / "plain.bin", b"NEW!")
+    assert not dest.holds(plain, "a/plain.bin"), "signature of older bytes"
+    assert not dest.holds(text, "a/text.jsonl"), "signature of older bytes"
+    dest.remote = {}
     dest.manifest = {"a/plain.bin": _sig(plain), "a/plain.bin.xz": _sig(plain)}
-    assert not dest.holds(plain, "a/plain.bin")
+    assert not dest.holds(plain, "a/plain.bin"), "signature, no object"
     dest.remote = {"a/plain.bin": 4}
     assert dest.holds(plain, "a/plain.bin")
+    plain.unlink()
+    assert not dest.holds(plain, "a/plain.bin"), "vanished"
 
 
-def test_holds_is_false_for_a_file_that_vanished(tmp):
-    """Nothing local to compare against, so nothing is proven stored."""
-    dest, _, _ = _store()
-    src = _write(Path(tmp) / "wire.jsonl", "x\n" * 100)
-    dest.upload_file(src, "k/wire.jsonl")
-    assert dest.holds(src, "k/wire.jsonl")
-    src.unlink()
-    assert not dest.holds(src, "k/wire.jsonl")
-
-
-def test_holds_dir_is_true_once_every_file_is_stored(tmp):
+def test_holds_dir_is_true_only_while_every_file_is_stored_as_it_is(tmp):
     """Keyed exactly as upload_dir keys them, nested paths included."""
     dest, _, _ = _store()
     root = Path(tmp) / "data"
-    _write(root / "top.json", '{"a": 1}')
-    _write(root / "nested" / "deep" / "blob.bin", _incompressible(4096))
+    _write(root / "top.json", '{"a": 1}', days_old=2)
+    blob = _write(root / "nested" / "deep" / "blob.bin", _incompressible(4096),
+                  days_old=2)
     assert not dest.holds_dir(root, "p/u/data")
     assert dest.upload_dir(root, "p/u/data") == 2
     assert dest.holds_dir(root, "p/u/data")
     assert not dest.holds_dir(root, "p/u/other")
-
-
-def test_holds_dir_is_false_when_one_file_changed_since_upload(tmp):
-    dest, _, _ = _store()
-    root = Path(tmp) / "data"
-    _write(root / "a.json", "{}", days_old=2)
-    blob = _write(root / "b.bin", b"OLD!", days_old=2)
-    dest.upload_dir(root, "p")
-    _write(blob, b"NEW!", days_old=1)  # same size, other bytes
-    assert not dest.holds_dir(root, "p")
-
-
-def test_holds_dir_is_false_when_one_file_was_never_uploaded(tmp):
-    dest, _, _ = _store()
-    root = Path(tmp) / "data"
-    _write(root / "a.json", "{}")
-    dest.upload_dir(root, "p")
+    _write(blob, _incompressible(4096)[::-1], days_old=1)  # same size
+    assert not dest.holds_dir(root, "p/u/data"), "one file changed since upload"
+    dest.upload_dir(root, "p/u/data")
     _write(root / "late.json", "{}")
-    assert not dest.holds_dir(root, "p")
-
-
-def test_a_dry_run_counts_what_it_would_upload_as_held(tmp):
-    """So the preview shows the deletions a real run would make."""
-    dest, client, _ = _store(dry_run=True)
-    src = _write(Path(tmp) / "wire.jsonl", "x\n" * 100)
-    root = Path(tmp) / "data"
-    _write(root / "blob.bin", _incompressible(4096))
-    _write(root / "old.jsonl.xz", lzma.compress(b"x"))
-    other = _write(Path(tmp) / "other.jsonl", "y\n")
-    assert dest.upload_file(src, "k/wire.jsonl")
-    assert dest.upload_dir(root, "p") == 2
-    assert dest.holds(src, "k/wire.jsonl")
-    assert dest.holds_dir(root, "p")
-    assert not dest.holds(other, "k/other.jsonl")  # never planned
-    assert client.puts == []
-
-
-def test_a_real_run_never_counts_a_failed_upload_as_held(tmp):
-    dest, client, _ = _store()
-    src = _write(Path(tmp) / "blob.bin", b"NEW!")
-    client.fail_puts.add("k/blob.bin")
-    try:
-        dest.upload_file(src, "k/blob.bin")
-    except RuntimeError as e:
-        assert "put refused: k/blob.bin" in str(e)
-    else:
-        raise AssertionError("the injected put failure never fired")
-    assert not dest.holds(src, "k/blob.bin")
+    assert not dest.holds_dir(root, "p/u/data"), "one file never uploaded"
 
 
 # --- compression policy ------------------------------------------------------------
 
-def test_text_is_stored_xz_and_inflates_back_to_the_original(tmp):
-    """Readers lzma-decompress the object; lzma is stdlib, so they need
-    no third-party dependency to do it."""
+def test_text_is_stored_xz_signed_skipped_unchanged_and_redone_changed(tmp):
+    """Readers lzma-decompress the object (stdlib, no dependency). Its size
+    cannot be compared to the file's, so the signature makes the next run
+    free. No twin, so no delete: one per upload would double the requests."""
     dest, client, _ = _store()
     src = _write(Path(tmp) / "wire.jsonl", '{"a": 1}\n' * 200)
-    assert dest.upload_file(src, "sessions/h/u/wire.jsonl")
-    assert client.puts == ["sessions/h/u/wire.jsonl.xz"]
-    assert lzma.decompress(client.objects["sessions/h/u/wire.jsonl.xz"]) \
-        == src.read_bytes()
-    assert "sessions/h/u/wire.jsonl" not in client.objects
-
-
-def test_an_uploaded_text_file_is_recorded_by_mtime_and_size(tmp):
-    """A compressed object's remote size cannot be compared to the local
-    file, so the signature is what makes the next run a no-op."""
-    dest, client, _ = _store()
-    src = _write(Path(tmp) / "wire.jsonl", "hello\n" * 50)
-    st = src.stat()
-    dest.upload_file(src, "k/wire.jsonl")
-    assert dest.manifest["k/wire.jsonl.xz"] == [st.st_mtime_ns, st.st_size]
-    assert dest.remote["k/wire.jsonl.xz"] == len(client.objects["k/wire.jsonl.xz"])
-
-
-def test_an_unchanged_text_file_is_not_uploaded_twice(tmp):
-    """Hourly cron over the same tree: the second run must be free."""
-    dest, client, _ = _store()
-    src = _write(Path(tmp) / "wire.jsonl", "x\n" * 100)
     assert dest.upload_file(src, "k/wire.jsonl")
+    assert lzma.decompress(client.objects["k/wire.jsonl.xz"]) == src.read_bytes()
+    assert "k/wire.jsonl" not in client.objects and client.deletes == []
+    assert dest.manifest["k/wire.jsonl.xz"] == _sig(src)
+    assert dest.remote["k/wire.jsonl.xz"] == len(client.objects["k/wire.jsonl.xz"])
     assert not dest.upload_file(src, "k/wire.jsonl")
+    # A live session directory changes under the archiver mid-run.
+    assert not dest.upload_file(Path(tmp) / "gone.jsonl", "k/gone.jsonl")
     assert client.puts == ["k/wire.jsonl.xz"]
-
-
-def test_a_changed_text_file_is_uploaded_again(tmp):
-    dest, client, _ = _store()
-    src = _write(Path(tmp) / "wire.jsonl", "x\n" * 100)
-    dest.upload_file(src, "k/wire.jsonl")
     _write(src, "x\n" * 400)
     assert dest.upload_file(src, "k/wire.jsonl")
     assert lzma.decompress(client.objects["k/wire.jsonl.xz"]) == src.read_bytes()
 
 
-def test_an_incompressible_binary_is_stored_plain(tmp):
-    """Storing it xz would make the object bigger than the file."""
+def test_an_incompressible_binary_is_stored_plain_a_compressible_one_xz(tmp):
+    """Storing the first xz would make the object bigger than the file."""
     dest, client, _ = _store()
     blob = _incompressible(4096)
     src = _write(Path(tmp) / "blob.bin", blob)
+    zeros = _write(Path(tmp) / "zeros.bin", b"\0" * 8192)
     assert dest.upload_file(src, "k/blob.bin")
+    assert dest.upload_file(zeros, "k/zeros.bin")
     assert client.objects["k/blob.bin"] == blob
     assert "k/blob.bin.xz" not in client.objects
     assert dest.remote["k/blob.bin"] == len(blob)
-    assert dest.manifest == {"k/blob.bin": _sig(src)}
+    assert lzma.decompress(client.objects["k/zeros.bin.xz"]) == b"\0" * 8192
+    assert dest.manifest == {"k/blob.bin": _sig(src), "k/zeros.bin.xz": _sig(zeros)}
 
 
-def test_a_compressible_binary_is_stored_xz(tmp):
-    dest, client, _ = _store()
-    src = _write(Path(tmp) / "blob.bin", b"\0" * 8192)
-    assert dest.upload_file(src, "k/blob.bin")
-    assert lzma.decompress(client.objects["k/blob.bin.xz"]) == b"\0" * 8192
-
-
-def test_an_unchanged_plain_binary_is_not_uploaded_twice(tmp):
-    """The plain leg skips on the manifest signature, like the xz leg."""
-    dest, client, _ = _store()
-    src = _write(Path(tmp) / "blob.bin", _incompressible(4096))
-    dest.upload_file(src, "k/blob.bin")
-    assert dest.manifest == {"k/blob.bin": _sig(src)}
-    assert not dest.upload_file(src, "k/blob.bin")
-    assert client.puts == ["k/blob.bin"]
-
-
-def test_a_same_size_changed_plain_binary_is_uploaded_again(tmp):
-    """Matching byte length is not matching bytes."""
+def test_a_plain_binary_is_skipped_unchanged_and_uploaded_at_the_same_size(tmp):
     dest, client, _ = _store()
     blob = _incompressible(4096)
     src = _write(Path(tmp) / "blob.bin", blob, days_old=2)
     dest.upload_file(src, "k/blob.bin")
+    assert dest.manifest == {"k/blob.bin": _sig(src)}
+    assert not dest.upload_file(src, "k/blob.bin")
+    assert client.puts == ["k/blob.bin"]
     _write(src, blob[::-1], days_old=1)
     assert dest.upload_file(src, "k/blob.bin")
     assert client.objects["k/blob.bin"] == blob[::-1]
@@ -497,8 +347,7 @@ def test_a_same_size_changed_plain_binary_is_uploaded_again(tmp):
 
 
 def test_a_changed_size_under_the_recorded_mtime_is_not_held(tmp):
-    """The signature is both fields: a rewrite that restores the recorded
-    mtime but changes the length is still not the stored bytes."""
+    """The signature is both fields, so this is not the stored bytes."""
     dest, client, _ = _store()
     src = _write(Path(tmp) / "wire.jsonl", "x\n" * 100, days_old=2)
     stat = src.stat()
@@ -506,27 +355,29 @@ def test_a_changed_size_under_the_recorded_mtime_is_not_held(tmp):
     src.write_bytes(b"y\n" * 50)
     os.utime(src, ns=(stat.st_atime_ns, stat.st_mtime_ns))
     assert src.stat().st_mtime_ns == stat.st_mtime_ns
-    assert src.stat().st_size != stat.st_size
     assert not dest.holds(src, "k/wire.jsonl")
     assert dest.upload_file(src, "k/wire.jsonl")
     assert lzma.decompress(client.objects["k/wire.jsonl.xz"]) == b"y\n" * 50
 
 
-def test_a_plain_object_with_no_recorded_signature_is_uploaded_once(tmp):
-    """An object stored before plain uploads were signed: the size matches,
-    so nothing proves its bytes are these. One re-upload, then signed."""
-    dest, client, _ = _store()
-    src = _write(Path(tmp) / "blob.bin", b"NEW!")
-    client.objects = {"k/blob.bin": b"OLD!"}
-    dest.inventory()
-    assert dest.upload_file(src, "k/blob.bin")
-    assert client.objects["k/blob.bin"] == b"NEW!"
-    assert not dest.upload_file(src, "k/blob.bin")
-    assert client.puts == ["k/blob.bin"]
+def test_a_same_size_object_with_no_recorded_signature_is_replaced_once(tmp):
+    """Stored before plain and verbatim uploads were signed: the size
+    matches, so nothing proves its bytes are these. One re-upload, then
+    signed; a stale signature does not skip either."""
+    for key in ("k/blob.bin", "k/old.jsonl.xz"):
+        dest, client, _ = _store()
+        src = _write(Path(tmp) / key, b"NEW!")
+        client.objects = {key: b"OLD!"}
+        dest.inventory()
+        assert dest.upload_file(src, key), key
+        assert client.objects[key] == b"NEW!", key
+        assert not dest.upload_file(src, key), key
+        dest.manifest = {key: [_sig(src)[0] - 1, 4]}
+        assert dest.upload_file(src, key), key
+        assert client.puts == [key, key], key
 
 
 def test_a_manifest_written_before_plain_signatures_is_honoured(tmp):
-    """Its compressed entries keep skipping exactly as they did."""
     dest, client, _ = _store()
     src = _write(Path(tmp) / "wire.jsonl", "x\n" * 100)
     client.objects = {
@@ -550,28 +401,8 @@ def test_an_already_compressed_input_is_stored_verbatim(tmp):
     assert client.objects["k/old.jsonl.xz"] == payload
     assert "k/old.jsonl.xz.xz" not in client.objects
     assert dest.manifest == {"k/old.jsonl.xz": _sig(src)}
-
-
-def test_a_verbatim_object_with_a_matching_signature_is_skipped(tmp):
-    dest, client, _ = _store()
-    src = _write(Path(tmp) / "old.jsonl.xz", b"12345")
-    dest.remote = {"k/old.jsonl.xz": 5}
-    dest.manifest = {"k/old.jsonl.xz": _sig(src)}
-    assert not dest.upload_file(src, "k/old.jsonl.xz")
-    assert client.puts == []
-
-
-def test_a_same_size_verbatim_object_without_its_signature_is_replaced(tmp):
-    """The verbatim leg trusted a size match too; it no longer does."""
-    dest, client, _ = _store()
-    src = _write(Path(tmp) / "old.jsonl.xz", b"NEW!!")
-    client.objects = {"k/old.jsonl.xz": b"OLD!!"}
-    dest.inventory()
-    assert dest.upload_file(src, "k/old.jsonl.xz")
-    assert client.objects["k/old.jsonl.xz"] == b"NEW!!"
-    dest.manifest = {"k/old.jsonl.xz": [_sig(src)[0] - 1, 5]}
-    assert dest.upload_file(src, "k/old.jsonl.xz")  # a stale signature too
-    assert client.puts == ["k/old.jsonl.xz", "k/old.jsonl.xz"]
+    assert not dest.upload_file(src, "k/old.jsonl.xz")  # matching signature
+    assert client.puts == ["k/old.jsonl.xz"]
 
 
 def test_the_manifest_object_is_never_compressed_on_the_upload_path(tmp):
@@ -587,36 +418,15 @@ def test_the_manifest_object_is_never_compressed_on_the_upload_path(tmp):
     assert client.puts == [key, key]
 
 
-def test_a_file_that_vanished_between_walk_and_upload_is_skipped(tmp):
-    """A live session directory changes under the archiver mid-run."""
-    dest, client, _ = _store()
-    assert not dest.upload_file(Path(tmp) / "gone.jsonl", "k/gone.jsonl")
-    assert client.puts == []
-
-
-def test_a_dry_run_reports_the_upload_without_making_it(tmp):
+def test_a_dry_run_puts_nothing_and_names_what_a_real_run_stores(tmp):
+    """A text key always lands at `<key>.xz`; a binary's form is decided by
+    compressing it, which a preview skips, so the size stated is the input's.
+    What it would upload counts as held: it previews a real run's deletions."""
     dest, client, said = _store(dry_run=True)
-    src = _write(Path(tmp) / "wire.jsonl", "x\n" * 100)
-    assert dest.upload_file(src, "k/wire.jsonl")
-    assert client.puts == []
-    assert dest.manifest == {}
-    assert any("DRY upload k/wire.jsonl" in line for line in said)
-
-
-def test_a_dry_run_names_the_xz_key_a_text_upload_lands_under(tmp):
-    """A text key is always stored at `<key>.xz`, so the preview can say so;
-    the size it can state without compressing is the input's."""
-    dest, _, said = _store(dry_run=True)
-    src = _write(Path(tmp) / "wire.jsonl", "x\n" * 1000)
-    assert dest.upload_file(src, "k/wire.jsonl")
-    assert said == ["  DRY upload k/wire.jsonl.xz "
-                    "(2,000 B uncompressed; compressed size not computed)"]
-
-
-def test_a_dry_run_does_not_guess_the_stored_form_of_a_binary(tmp):
-    """Plain or xz is decided by compressing it, which a preview skips."""
-    dest, _, said = _store(dry_run=True)
-    src = _write(Path(tmp) / "blob.bin", _incompressible(4096))
+    text = _write(Path(tmp) / "wire.jsonl", "x\n" * 1000)
+    root = Path(tmp) / "data"
+    _write(root / "blob.bin", _incompressible(4096))
+    packed = _write(root / "old.jsonl.xz", lzma.compress(b"x"))
     original = _STORE.lzma.compress
 
     def _refuse(*_a, **_kw):
@@ -624,20 +434,24 @@ def test_a_dry_run_does_not_guess_the_stored_form_of_a_binary(tmp):
 
     _STORE.lzma.compress = _refuse
     try:
-        assert dest.upload_file(src, "k/blob.bin")
+        assert dest.upload_file(text, "k/wire.jsonl")
+        assert dest.upload_dir(root, "p") == 2
     finally:
         _STORE.lzma.compress = original
-    assert said == ["  DRY upload k/blob.bin or k/blob.bin.xz "
-                    "(4,096 B uncompressed; stored form undetermined until "
-                    "upload)"]
-
-
-def test_a_dry_run_reports_a_verbatim_upload_without_making_it(tmp):
-    dest, client, said = _store(dry_run=True)
-    src = _write(Path(tmp) / "old.jsonl.xz", lzma.compress(b"x"))
-    assert dest.upload_file(src, "k/old.jsonl.xz")
-    assert client.puts == []
-    assert any("DRY upload k/old.jsonl.xz" in line for line in said)
+    assert dest.upload_bytes(b"12345", "k")
+    dest.save_manifest()
+    assert (client.puts, dest.manifest) == ([], {})
+    assert sorted(said) == sorted([
+        "  DRY upload k/wire.jsonl.xz "
+        "(2,000 B uncompressed; compressed size not computed)",
+        "  DRY upload p/blob.bin or p/blob.bin.xz "
+        "(4,096 B uncompressed; stored form undetermined until upload)",
+        f"  DRY upload p/old.jsonl.xz ({packed.stat().st_size:,} B)",
+        "  DRY upload k (5 B)", f"  DRY put manifest {_STORE.manifest_key()} (0 entries)"])
+    assert dest.holds(text, "k/wire.jsonl")
+    assert dest.holds_dir(root, "p")
+    other = _write(Path(tmp) / "other.jsonl", "y\n")
+    assert not dest.holds(other, "k/other.jsonl")  # never planned
 
 
 # --- stale twins --------------------------------------------------------------------
@@ -684,44 +498,17 @@ def test_a_failed_twin_delete_is_logged_and_the_upload_still_counts(tmp):
     assert dest.manifest == {"k/blob.bin.xz": _sig(src)}
 
 
-def test_no_twin_delete_is_attempted_when_there_is_no_twin(tmp):
-    """The common case; a delete per upload would double the request count."""
-    dest, client, _ = _store()
-    src = _write(Path(tmp) / "wire.jsonl", "x\n" * 100)
-    dest.upload_file(src, "k/wire.jsonl")
-    assert client.deletes == []
-
-
 # --- upload_bytes --------------------------------------------------------------------
 
-def test_upload_bytes_stores_the_body_under_the_key(tmp):
+def test_upload_bytes_stores_the_body_and_records_what_it_stored(tmp):
+    """Without the record the same marker uploads again later in the same
+    run -- the Kimi copy omitted it, the defect the shared version fixes."""
     dest, client, _ = _store()
-    assert dest.upload_bytes(b'{"path": "/p"}', "sessions/h/project.json")
-    assert client.objects["sessions/h/project.json"] == b'{"path": "/p"}'
-
-
-def test_upload_bytes_records_what_it_stored(tmp):
-    """Without this the same marker uploads again later in the same run --
-    the Kimi copy omitted it, which is the defect the shared version fixes."""
-    dest, client, _ = _store()
-    dest.upload_bytes(b"12345", "sessions/h/project.json")
+    assert dest.upload_bytes(b"12345", "sessions/h/project.json")
+    assert client.objects["sessions/h/project.json"] == b"12345"
     assert dest.remote["sessions/h/project.json"] == 5
     assert not dest.upload_bytes(b"12345", "sessions/h/project.json")
     assert client.puts == ["sessions/h/project.json"]
-
-
-def test_upload_bytes_skips_when_the_stored_size_already_matches(tmp):
-    dest, client, _ = _store()
-    dest.remote = {"k": 5}
-    assert not dest.upload_bytes(b"12345", "k")
-    assert client.puts == []
-
-
-def test_upload_bytes_in_a_dry_run_puts_nothing(tmp):
-    dest, client, said = _store(dry_run=True)
-    assert dest.upload_bytes(b"12345", "k")
-    assert client.puts == []
-    assert any("DRY upload k" in line for line in said)
 
 
 # --- upload_dir -----------------------------------------------------------------------
@@ -735,23 +522,10 @@ def test_upload_dir_keys_every_file_by_its_posix_relative_path(tmp):
     assert dest.upload_dir(root, "p/u/data") == 2
     assert sorted(client.objects) == ["p/u/data/nested/deep/note.txt.xz",
                                       "p/u/data/top.json.xz"]
-
-
-def test_upload_dir_counts_objects_uploaded_not_files_visited(tmp):
-    dest, _, _ = _store()
-    root = Path(tmp) / "data"
-    _write(root / "a.json", "{}")
-    _write(root / "b.json", "{}")
-    assert dest.upload_dir(root, "p") == 2
-    assert dest.upload_dir(root, "p") == 0
-
-
-def test_upload_dir_of_an_empty_directory_uploads_nothing(tmp):
-    dest, client, _ = _store()
-    root = Path(tmp) / "empty"
-    root.mkdir()
-    assert dest.upload_dir(root, "p") == 0
-    assert client.objects == {}
+    assert dest.upload_dir(root, "p/u/data") == 0  # objects uploaded, not visited
+    (Path(tmp) / "empty").mkdir()
+    assert dest.upload_dir(Path(tmp) / "empty", "p") == 0
+    assert len(client.objects) == 2
 
 
 if __name__ == "__main__":

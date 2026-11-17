@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 '''Archive Codex CLI rollouts to R2. Third sibling of the Claude and Kimi
-archivers, and deliberately not a new design: the key layout, the compression
-policy, the per-machine manifest, the single-instance lock and the retention
-gate are all shared, and live in store.py and runtime.py.
+archivers: the key layout, the compression policy, the per-machine manifest,
+the single-instance lock and the retention gate are all shared, and live in
+store.py and runtime.py.
 
 Designed to run hourly via cron. Behaviour per run:
 1. Acquire single-instance lock. If a previous run still holds it, exit
    silently.
-2. For every rollout under ~/.codex/sessions/YYYY/MM/DD/, read its
-   session_meta head, derive its key, upload (skipped while its manifest
-   signature matches).
+2. For every rollout under ~/.codex/sessions/YYYY/MM/DD/ or
+   ~/.codex/archived_sessions/, read its session_meta head, derive its
+   key, upload (skipped while its manifest signature matches).
 3. Publish one sessions/<hash>/project.json marker per project so the
    dashboard can show a path instead of a hash.
-4. Delete a local rollout once the bucket verifiably holds it AND it
+4. Delete a sessions/ rollout once the bucket verifiably holds it AND it
    is older than DAYS, unless a live Codex writer still holds its
-   thread-writer lock.
+   thread-writer lock. Never one in archived_sessions/: Codex unarchives a
+   thread by moving its rollout back, and fails once it is gone.
 5. Log a one-liner summary to ~/.codex/archive-codex-sessions.log.
 6. Prune ~/.codex/thread_history_1.sqlite: drop the rows of every thread
    whose rollout is no longer on disk (see prune_thread_history).
@@ -22,17 +23,16 @@ Designed to run hourly via cron. Behaviour per run:
 WHY THE KEY LAYOUT IS THE KIMI ONE, NOT A CODEX-SHAPED ONE
 ----------------------------------------------------------
 On disk Codex is date-bucketed (YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl) and
-carries no project in the path at all. That layout cannot be uploaded
-as-is: backend/ingest.py reads project_id and session_id OUT OF THE KEY,
-before it fetches anything. So the archiver does the translation, exactly
-as the Kimi one already does for kimi-code (mapping agents/main/wire.jsonl
-onto sessions/<hash>/<uuid>/wire.jsonl):
+carries no project in the path. That layout cannot be uploaded as-is:
+backend/ingest.py reads project_id and session_id OUT OF THE KEY, before it
+fetches anything. So the archiver does the translation, as the Kimi one does
+for kimi-code:
 
   sessions/<md5(cwd)[:12]>/<thread_id>/wire.jsonl[.xz]
   sessions/<md5(cwd)[:12]>/<thread_id>/subagents/<rollout_uuid>/wire.jsonl[.xz]
   sessions/<md5(cwd)[:12]>/project.json                       {"path": cwd}
 
-Both facts that shape it were measured over the 51 rollouts on this box:
+Both facts were measured over the 51 rollouts on this box:
 
   * A MAIN thread has exactly one rollout file (9 files, 9 thread ids), so
     <thread_id> is a unique key for it.
@@ -166,10 +166,10 @@ def rollout_key(path, meta):
 
 
 def find_rollouts():
-    '''Every rollout on this machine, oldest path first.'''
-    if not SESSIONS_DIR.is_dir():
-        return []
-    return sorted(SESSIONS_DIR.glob('**/rollout-*.jsonl'))
+    '''Every rollout on this machine, oldest path first: sessions/, then the
+    flat archived_sessions/.'''
+    return (sorted(SESSIONS_DIR.glob('**/rollout-*.jsonl'))
+            + sorted(ARCHIVED_SESSIONS_DIR.glob('rollout-*.jsonl')))
 
 
 def writer_lock_held(thread_id):
@@ -345,7 +345,8 @@ def _retire_local(path, key, dest, cutoff):
 
 
 def archive_rollouts(dest, cutoff):
-    '''Upload every rollout, then delete the ones past the retention gate.'''
+    '''Upload every rollout, then delete the sessions/ ones past the
+    retention gate.'''
     tally = Counter()
     projects = {}
 
@@ -365,7 +366,8 @@ def archive_rollouts(dest, cutoff):
             dest.log(f'upload failed: {path} err={e}')
             tally['failed'] += 1
             continue
-        if _retire_local(path, key, dest, cutoff):
+        if (path.parent != ARCHIVED_SESSIONS_DIR
+                and _retire_local(path, key, dest, cutoff)):
             tally['deleted'] += 1
 
     m_up, m_failed = _upload_markers(dest, projects)

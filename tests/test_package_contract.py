@@ -50,17 +50,8 @@ def test_no_long_hex_literal_slipped_in(_tmp):
 
 
 def _import(name):
-    """Import a module as part of the package.
-
-    Not `_util.load`, which loads by path: these modules use relative imports
-    for the settings resolver, and a path load has no parent package to resolve
-    them against. The trade is that a broken __init__ surfaces here rather than
-    in the module under test, which the failure message makes obvious anyway.
-    """
-    import importlib
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
-    return importlib.import_module(f"session_archivers.{name}")
+    """Import by package, not by path: see `_util.load_package_module`."""
+    return _util.load_package_module(name)
 
 
 def test_every_archiver_exposes_main(_tmp):
@@ -109,14 +100,23 @@ def test_each_archiver_targets_its_own_bucket_and_home(_tmp):
 
 def test_the_version_is_a_single_source_of_truth(_tmp):
     """pyproject reads __version__; a second literal could disagree with it."""
-    init = (PACKAGE / "__init__.py").read_text(encoding="utf-8")
-    tree = ast.parse(init)
+    init = ast.parse((PACKAGE / "__init__.py").read_text(encoding="utf-8"))
     version = next(
-        (node.value.value for node in tree.body
+        (node.value.value for node in init.body
          if isinstance(node, ast.Assign)
          and getattr(node.targets[0], "id", None) == "__version__"),
         None)
-    assert isinstance(version, str) and version.count(".") == 2, version
+    assert isinstance(version, str) and re.fullmatch(
+        r"[0-9]+\.[0-9]+\.[0-9]+(\.dev[0-9]+)?", version), version
+    # Every module and any store of the name, so a later module is covered.
+    for path in PACKAGE.rglob("*.py"):
+        stores = [node for node in ast.walk(ast.parse(
+            path.read_text(encoding="utf-8"))) if isinstance(node, ast.Name)
+            and node.id == "__version__" and isinstance(node.ctx, ast.Store)]
+        assert path.name == "__init__.py" or not stores, \
+            f"{path.name} declares its own __version__"
+    for name in ("kimi", "codex"):
+        assert _import(name).__version__ == version, name
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = { attr = "session_archivers.__version__" }' in pyproject
     assert f'"{version}"' not in pyproject, (

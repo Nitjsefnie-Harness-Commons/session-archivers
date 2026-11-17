@@ -53,9 +53,11 @@ archive-codex-sessions  [--days N] [--dry-run]
 
 `--dry-run` previews every action and writes nothing, locally or remotely.
 `--days` sets the retention threshold for the delete gate; upload is
-independent of it. A stale file is removed only once it is verified in the
-bucket, in every bucket its session was filed under; one that is not stays,
-and the run logs `kept, not verified in the bucket`.
+independent of it. A stale session or file is removed only once the bucket
+verifiably holds every object the archiver uploads from it, in every bucket
+the session was filed under; one that does not stays, and the run logs
+`kept, not verified in the bucket`. A Kimi-Code session directory is removed
+whole, so files in it that the archiver never uploads go with it.
 
 The Codex archiver keeps a rollout whose thread-writer lock a live Codex
 process still holds, however old it is. After the rollout pass it also prunes

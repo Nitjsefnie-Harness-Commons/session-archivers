@@ -328,7 +328,7 @@ def _retire_local(path, key, dest, cutoff):
     if not runtime.is_old(path, cutoff):
         return False
     if not dest.holds(path, key):
-        dest.log(f'  kept, not verified in the bucket: {path}')
+        runtime.log_kept_unverified(dest.log, path)
         return False
     if writer_lock_held(rollout_uuid(path)):
         dest.log(f'  kept, a live writer still holds it: {path}')

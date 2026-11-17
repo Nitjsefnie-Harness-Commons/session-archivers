@@ -108,6 +108,12 @@ def is_old(path, cutoff):
         return False
 
 
+def log_kept_unverified(log, path):
+    '''The line for a stale path left in place because the bucket does not
+    verifiably hold everything the archiver uploaded from it.'''
+    log(f'  kept, not verified in the bucket: {path}')
+
+
 def sweep_files(directory, cutoff, dry_run, log):
     '''Delete the files directly under `directory` that are older than
     `cutoff`. Missing directory: nothing to do.'''

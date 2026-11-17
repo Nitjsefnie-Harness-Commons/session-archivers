@@ -93,9 +93,10 @@ python3 .github/scripts/commit_scopes.py
   pylint and pycodestyle: an untracked one is checked by nobody. (`git ls-files
   -co --exclude-standard` includes untracked files that are not ignored.)
 - The `actionlint` workflow runs [Nitjsefnie-OSC/actionlint
-  v1.7.12-queue.1](https://github.com/Nitjsefnie-OSC/actionlint/releases/tag/v1.7.12-queue.1),
+  v1.7.12-queue.3](https://github.com/Nitjsefnie-OSC/actionlint/releases/tag/v1.7.12-queue.3),
   checksum-verified, not stock actionlint 1.7.12: `claim.yml` sets
-  `queue: max`, which the stock build rejects. Run `actionlint
+  `queue: max` and `ci-gate.yml` calls its legs as `$/.github/workflows/...`,
+  both of which the stock build rejects. Run `actionlint
   .github/workflows/*.yml` with that build.
 - The `secrets` workflow runs gitleaks 8.30.1 over the full history
   (`gitleaks detect --verbose --redact`). It ignores a `gitleaks:allow` comment

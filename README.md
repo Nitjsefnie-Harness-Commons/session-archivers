@@ -153,8 +153,9 @@ actionlint .github/workflows/*.yml && zizmor .github/workflows/  # workflows
 ```
 
 The workflow lint needs the actionlint build the `actionlint` workflow
-installs, Nitjsefnie-OSC/actionlint v1.7.12-queue.1: stock 1.7.12 rejects
-the `queue: max` key in `claim.yml`.
+installs, Nitjsefnie-OSC/actionlint v1.7.12-queue.3: stock 1.7.12 rejects
+the `queue: max` key in `claim.yml` and the `$/` form `ci-gate.yml` calls
+its legs with.
 
 `pip install -r requirements-dev.txt -r requirements-test.txt` gets the
 pinned toolchain. Use `-co --exclude-standard`, not a bare `git ls-files`:

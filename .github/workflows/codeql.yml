@@ -6,13 +6,10 @@ name: codeql
 # Security tab rather than turning the build red, so a new query shipping
 # upstream cannot block an unrelated push.
 #
-# `push` is limited to main: a same-repo pull request head already runs on
-# the `pull_request` event, and an unfiltered `push` would schedule the same
-# commit a second time under another ref, which the `concurrency` group
-# (keyed on the ref) cannot fold. Both events check out the event's own
-# commit (the merge commit, on a pull request) and `analyze` uploads its
-# SARIF against that same ref and SHA, so alerts always describe the tree
-# that was analysed.
+# ci gate runs it on pushes to main and pull requests. Each run checks out
+# the event's own commit (the merge commit, on a pull request) and `analyze`
+# uploads its SARIF against that same ref and SHA, so alerts always describe
+# the tree that was analysed.
 #
 # The weekly cron is not redundant with push: CodeQL's query packs are
 # updated continuously, and a new query only ever runs against code that
@@ -20,13 +17,10 @@ name: codeql
 # would never be applied to a file last touched last year.
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - 'LICENSE'
-      - '.gitignore'
+  # Only for the required bare analyze checks (a ci gate leg reports
+  # `codeql / analyze (python)`); goes once the ruleset requires `aggregate`.
   pull_request:
+  workflow_call:
   schedule:
     # Wednesday 03:47 UTC. Off the hour and off Monday deliberately: the top
     # of the hour is when every cron on GitHub fires at once and jobs queue.
@@ -34,7 +28,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: codeql-${{ github.ref }}
+  group: ${{ github.workflow == 'codeql' && format('codeql-{0}', github.ref) || format('codeql-called-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:

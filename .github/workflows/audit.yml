@@ -10,13 +10,7 @@ name: audit
 # they cannot be one invocation.
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - 'LICENSE'
-      - '.gitignore'
-  pull_request:
+  workflow_call:
   schedule:
     - cron: '12 4 * * *'
   workflow_dispatch:
@@ -25,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: audit-${{ github.ref }}
+  group: ${{ github.workflow == 'audit' && format('audit-{0}', github.ref) || format('audit-called-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:

@@ -30,24 +30,14 @@ name: actionlint
 # next one is the one nobody has thought about yet.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/**'
-      - '.github/dependabot.yml'
-      - 'requirements-zizmor.txt'
-  pull_request:
-    paths:
-      - '.github/workflows/**'
-      - '.github/dependabot.yml'
-      - 'requirements-zizmor.txt'
+  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: actionlint-${{ github.ref }}
+  group: ${{ github.workflow == 'actionlint' && format('actionlint-{0}', github.ref) || format('actionlint-called-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:

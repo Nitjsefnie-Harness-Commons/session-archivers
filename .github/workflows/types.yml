@@ -11,23 +11,18 @@ name: types
 # The one runtime dependency, boto3, installs with `.` below.
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - 'LICENSE'
-      - '.gitignore'
+  # Until the ruleset requires `aggregate`: the required pyright check
+  # comes only from this run.
   pull_request:
+  workflow_call:
   workflow_dispatch:
 
-# Least privilege: this job only reads the tree. Without an explicit
-# block it inherits the repository default, which can be read/write
-# for the whole token.
+# Least privilege: the default token can be read/write.
 permissions:
   contents: read
 
 concurrency:
-  group: types-${{ github.ref }}
+  group: ${{ github.workflow == 'types' && format('types-{0}', github.ref) || format('types-called-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:

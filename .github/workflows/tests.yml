@@ -12,15 +12,10 @@ name: tests
 # would let the two disagree.
 
 on:
-  push:
-    branches: [main]
-    # Deny-list rather than an allow-list: a new top-level code directory
-    # would silently stop being tested under an allow-list.
-    paths-ignore:
-      - '**/*.md'
-      - 'LICENSE'
-      - '.gitignore'
+  # Only for the required bare coverage and wheel checks (a ci gate leg
+  # reports `tests / coverage`); goes once the ruleset requires `aggregate`.
   pull_request:
+  workflow_call:
   workflow_dispatch:
 
 # Least privilege: this job only reads the tree. Without an explicit
@@ -30,7 +25,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: tests-${{ github.ref }}
+  group: ${{ github.workflow == 'tests' && format('tests-{0}', github.ref) || format('tests-called-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:

@@ -166,8 +166,8 @@ def rollout_key(path, meta):
 
 
 def find_rollouts():
-    '''Every rollout on this machine, oldest path first: sessions/, then the
-    flat archived_sessions/.'''
+    '''Every rollout on this machine: sessions/ then the flat
+    archived_sessions/, each oldest first.'''
     return (sorted(SESSIONS_DIR.glob('**/rollout-*.jsonl'))
             + sorted(ARCHIVED_SESSIONS_DIR.glob('rollout-*.jsonl')))
 

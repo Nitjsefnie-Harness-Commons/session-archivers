@@ -16,8 +16,8 @@ Behaviour per run:
    agents/<agent-N>/wire.jsonl -> sessions/<hash>/<uuid>/subagents/<agent-N>/wire.jsonl.
 6. Log a one-liner summary to ~/.kimi-code/archive-sessions.log.
 
-Steps 3-5 delete a stale path only once the bucket verifiably holds every
-file in it; Kimi-Code keeps a session with a wire.jsonl no leg uploads.
+Steps 3-5 delete a stale path only once the bucket verifiably holds all
+of it; Kimi-Code keeps a session with a wire.jsonl[.xz] no leg uploads.
 
 Only the WALKS are here. The destination — key layout, compression policy,
 manifest, inventory — lives in store.py, and the host-side scaffolding —

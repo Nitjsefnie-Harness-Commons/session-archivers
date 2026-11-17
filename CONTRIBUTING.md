@@ -140,9 +140,14 @@ manifest commits do; Dependabot's pull requests carry the prefix
 `.github/dependabot.yml` configures (`deps` for the pip manifests, `ci` for the
 workflow actions).
 
-`__version__` in `session_archivers/__init__.py` is the release: when it changes
-on `main`, the `tag` workflow waits for the other checks on that commit and
-pushes `v<version>`, and the `release` workflow builds the wheel from that tag.
+`__version__` in `session_archivers/__init__.py` is the release. Between
+releases `main` carries a development version, `X.Y.Z.devN`, which the `tag`
+workflow never tags. The commit that sets it to a release version `X.Y.Z` is
+the release: `tag` waits for the required gates on that commit (named in
+`tag.yml` and in the CI table of [README.md](README.md)), refuses to tag if any
+check on it has failed, pushes `vX.Y.Z` and starts the `release` workflow, which
+builds the wheel from that tag and publishes it with its `SHA256SUMS` and a
+build-provenance attestation. `tag` then commits `X.Y.(Z+1).dev0` to `main`.
 Say in the pull request when a change warrants a bump; the maintainer decides
 which part.
 

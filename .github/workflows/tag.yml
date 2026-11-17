@@ -8,9 +8,9 @@ name: tag
 # after bumping __version__, and a forgotten tag means a version bump that
 # never ships.
 #
-# So this composes with it rather than replacing it: it watches the one file
-# that carries the version, pushes the tag, and then STARTS release.yml by
-# hand. That last part is not belt-and-braces: a `v*` tag pushed with the
+# So this composes with it rather than replacing it: on every push to main it
+# tags __version__ if that tag does not exist yet, and then STARTS release.yml
+# by hand. That last part is not belt-and-braces: a `v*` tag pushed with the
 # built-in GITHUB_TOKEN does not trigger release.yml at all. GitHub suppresses
 # workflow runs from token-authored events so a workflow cannot loop on its
 # own pushes, and `workflow_dispatch` is one of the two documented exceptions
@@ -32,10 +32,9 @@ name: tag
 
 on:
   push:
+    # No path filter: a push that supersedes the version bump cancels the
+    # bump's gates, so the superseding commit must carry the pending tag.
     branches: [main]
-    paths:
-      # The narrowest possible allow-list: the file that holds __version__.
-      - 'session_archivers/__init__.py'
   workflow_dispatch:
     inputs:
       sha:
@@ -91,24 +90,32 @@ jobs:
           echo "Version is $version"
 
       - name: Refuse to re-tag an existing version
+        id: free
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
           REPO: ${{ github.repository }}
-        # An existing tag means either a mistaken edit or a rerun after a
-        # partial failure. Both want a human, and both are silent if this
-        # step is a no-op instead of an error.
+        # On a push an existing tag is the normal case: this version shipped
+        # and the push did not bump it. On a dispatch it means a mistaken
+        # input or a rerun after a partial failure, which wants a human.
         run: |
           if gh api -H "Cache-Control: no-cache" \
                "repos/$REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            if [ "$GITHUB_EVENT_NAME" = push ]; then
+              echo "$TAG already exists; nothing to tag."
+              echo "free=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             echo "Tag $TAG already exists — __version__ was set to a version" >&2
             echo "that has already shipped. Bump it further, or delete that" >&2
             echo "tag and its release if it was cut in error." >&2
             exit 1
           fi
           echo "$TAG is free"
+          echo "free=true" >> "$GITHUB_OUTPUT"
 
       - name: Wait for the other gates on this commit
+        if: steps.free.outputs.free == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ inputs.sha || github.sha }}
@@ -158,6 +165,7 @@ jobs:
           exit 1
 
       - name: Create and push the tag
+        if: steps.free.outputs.free == 'true'
         env:
           TAG: ${{ steps.version.outputs.tag }}
           SHA: ${{ inputs.sha || github.sha }}
@@ -176,6 +184,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Start the release
+        if: steps.free.outputs.free == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}

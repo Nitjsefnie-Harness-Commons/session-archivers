@@ -148,8 +148,9 @@ the release: `tag` waits for the required gates on that commit (named in
 check on it has failed, pushes `vX.Y.Z` and starts the `release` workflow, which
 builds the wheel from that tag and publishes it with its `SHA256SUMS` and a
 build-provenance attestation. `tag` then commits `X.Y.(Z+1).dev0` to `main`.
-Say in the pull request when a change warrants a bump; the maintainer decides
-which part.
+A later push that cancels that commit's gates before they finish is tagged in
+its place, as it still carries the version. Say in the pull request when a
+change warrants a bump; the maintainer decides which part.
 
 ## Issues
 

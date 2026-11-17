@@ -47,9 +47,9 @@ jobs:
 
     env:
       # Nitjsefnie-OSC/actionlint, not stock rhysd/actionlint: upstream 1.7.12
-      # plus rhysd/actionlint#654 and #732: stock rejects claim.yml's
-      # `queue: max` and ci-gate.yml's `$/` calls. Drop this fork once
-      # upstream carries both.
+      # plus rhysd/actionlint#654, #732 and #707; stock rejects claim.yml's
+      # `queue: max` and ci-gate.yml's `$/` calls. Drop it once
+      # upstream carries them.
       ACTIONLINT_VERSION: 1.7.12-queue.3
       # sha256 of actionlint_1.7.12-queue.3_linux_amd64.tar.gz, from the
       # release's own checksums file. Bump both together.

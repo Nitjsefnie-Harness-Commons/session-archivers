@@ -52,9 +52,8 @@ Flags:
 Exit code: 0 on success, 1 if any upload failed.
 '''
 
-__version__ = '2.1.2'
 # Cross-platform: must work on Linux AND Windows. No POSIX-only calls without
-# a Windows fallback. Bump __version__ (SemVer) on every substantive change.
+# a Windows fallback.
 
 import argparse
 import contextlib
@@ -67,7 +66,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import runtime, store
+from . import __version__, runtime, store
 from .settings import setting
 
 BUCKET = setting('R2_BUCKET_CODEX', 'codex')

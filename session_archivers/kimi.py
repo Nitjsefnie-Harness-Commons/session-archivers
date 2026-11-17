@@ -30,9 +30,8 @@ Flags:
 Exit code: 0 on success, 1 if any upload failed.
 '''
 
-__version__ = '2.0.1'
 # Cross-platform: must work on Linux AND Windows. No POSIX-only calls without a
-# Windows fallback. Bump __version__ (SemVer) on every substantive change.
+# Windows fallback.
 
 import argparse
 import hashlib
@@ -42,7 +41,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import runtime, store
+from . import __version__, runtime, store
 from .settings import setting
 
 BUCKET = setting('R2_BUCKET_KIMI', 'kimi')

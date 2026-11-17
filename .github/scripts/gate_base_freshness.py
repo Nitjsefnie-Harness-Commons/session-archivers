@@ -1,4 +1,4 @@
-"""Refuse a head lacking a commit fetched main holds on GATE_PATHS.
+"""Refuse a head lacking a commit main holds on GATE_PATHS at run time.
 
 --full-history keeps side branches a merge left TREESAME.
 """
@@ -43,9 +43,11 @@ def main() -> int:
     if stale:
         print(f'main holds commits this head lacks that touch {paths}:')
         print(''.join(f'  {line}\n' for line in stale.decode(errors='replace').splitlines()), end='')
-        print('Rebase onto main and push again, so the checks run under the gates main defines.')
+        print('Rebase onto main and push again: the pull request lands by rebase, '
+              "so its own commits must carry main's gate definitions.")
         return 1
-    print(f'This head carries every commit on main that touches {paths}.')
+    print(f'This head carries every commit on main that touches {paths}. '
+          'A commit main gains after this run is not seen until the check runs again.')
     return 0
 
 

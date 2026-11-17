@@ -30,16 +30,14 @@ def test_no_archiver_carries_a_credential(_tmp):
     for name in ARCHIVERS + ("settings",):
         source = (PACKAGE / f"{name}.py").read_text(encoding="utf-8")
         for pattern, what in CREDENTIAL_PATTERNS[:3]:
-            assert not re.search(pattern, source, re.MULTILINE), \
-                f"{name}.py hardcodes the R2 {what}"
+            assert not re.search(pattern, source, re.M), f"{name}.py hardcodes the R2 {what}"
 
 
 def test_no_long_hex_literal_slipped_in(_tmp):
     """The catch-all the named patterns would miss under a different variable."""
     offenders = []
     for path in sorted(PACKAGE.glob("*.py")):
-        for number, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(), 1):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if line.lstrip().startswith("#"):
                 continue
             if re.search(r"['\"][0-9a-f]{32,}['\"]", line):
@@ -100,14 +98,16 @@ def test_each_archiver_targets_its_own_bucket_and_home(_tmp):
 
 def test_the_version_is_a_single_source_of_truth(_tmp):
     """pyproject reads __version__; a second literal could disagree with it."""
-    init = ast.parse((PACKAGE / "__init__.py").read_text(encoding="utf-8"))
+    text = (PACKAGE / "__init__.py").read_text(encoding="utf-8")
     version = next(
-        (node.value.value for node in init.body
+        (node.value.value for node in ast.parse(text).body
          if isinstance(node, ast.Assign)
          and getattr(node.targets[0], "id", None) == "__version__"),
         None)
     assert isinstance(version, str) and re.fullmatch(
         r"[0-9]+\.[0-9]+\.[0-9]+(\.dev[0-9]+)?", version), version
+    assert re.findall(r"^__version__.*$", text, re.M) == [
+        f'__version__ = "{version}"'], "tag.yml's bump job cannot read this line"
     # Name stores outside the root; except/case/import-as, def, globals() miss.
     for path in PACKAGE.rglob("*.py"):
         stores = [node for node in ast.walk(ast.parse(

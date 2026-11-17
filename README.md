@@ -228,7 +228,7 @@ it, starts `release`, which publishes from the tag, and then commits
 `X.Y.(Z+1).dev0` to `main`, so no later commit claims a published
 version. A later push the gates run on, landing before they finish on
 that commit, cancels them: `tag` then refuses that commit and tags the
-later one, which still carries the version. If the `.dev0` push is
+later one, if that push left `__version__` as it was. If the `.dev0` push is
 refused because `main` moved, re-run the failed `bump` job; the next push
 the gates run on, while `main` still carries `X.Y.Z`, makes it too.
 

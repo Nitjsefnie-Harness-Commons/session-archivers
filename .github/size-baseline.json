@@ -1,10 +1,10 @@
 {
   "trees": {
-    "tests/": 3539
+    "tests/": 3528
   },
   "schema_version": 1,
   "baseline": {
-    "tests/test_archive_walks.py": 1934,
-    "tests/test_store.py": 541
+    "tests/test_archive_walks.py": 1910,
+    "tests/test_store.py": 532
   }
 }

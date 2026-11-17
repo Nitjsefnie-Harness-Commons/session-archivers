@@ -107,6 +107,37 @@ def _dests(dry_run=False):
             claude_client, zai_client, said)
 
 
+class _SkippingStore(_STORE.Store):  # pylint: disable=too-few-public-methods
+    """A Store whose upload of any key containing a fragment is a silent
+    no-op: no exception, no failure counted, nothing stored. It stands for
+    an upload that reported nothing wrong and left nothing verifiable in the
+    bucket, so a test through it controls the delete gate itself, apart from
+    the walks' exception handling."""
+
+    def __init__(self, *args, skip=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.skip = tuple(skip)
+        self.skipped = []
+
+    def upload_file(self, local_path, key):
+        if any(fragment in key for fragment in self.skip):
+            self.skipped.append(key)
+            return False
+        return super().upload_file(local_path, key)
+
+
+def _skipping_dest(*fragments):
+    """`_dest()` with a store that silently skips keys naming a fragment."""
+    client = _util.FakeS3(_BUCKET)
+    said = []
+    return (_SkippingStore(client, _BUCKET, said.append, skip=fragments),
+            client, said)
+
+
+_KEPT = "kept, not verified in the bucket"
+"""The line a walk logs for a session it left in place for that reason."""
+
+
 def _write(path, data, days_old=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(data, str):
@@ -378,6 +409,117 @@ def test_claude_counts_a_failed_orphan_upload_and_keeps_the_dir(tmp):
         assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (0, 0, 1, 0)
     assert orphan.exists()
     assert any("orphan uuid_dir" in line for line in said)
+
+
+def _multi_family_route_pair(skip=()):
+    """Stores for the claude and zai buckets; the zai one silently skips
+    every key naming a fragment in `skip`."""
+    claude_client = _util.FakeS3(_BUCKET)
+    zai_client = _util.FakeS3(_ZAI_BUCKET)
+    said = []
+    claude = _STORE.Store(claude_client, _BUCKET, said.append)
+    zai = _SkippingStore(zai_client, _ZAI_BUCKET, said.append, skip=skip)
+    return claude, zai, claude_client, zai_client, said
+
+
+def test_claude_keeps_a_session_whose_upload_was_silently_skipped(tmp):
+    """No exception, no failure counted: only the gate can keep it."""
+    projects = Path(tmp) / "projects"
+    uuid = "qq01-skip"
+    jsonl = _write(projects / "p" / f"{uuid}.jsonl",
+                   _session_body(_claude_entries()), days_old=10)
+    blob = _write(projects / "p" / uuid / "blob.json", "{}")
+    dest, _, said = _skipping_dest(f"{uuid}.jsonl")
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, dest, _cutoff()) == (1, 0, 0, 0)
+    assert dest.skipped == [f"p/{uuid}/{uuid}.jsonl"]
+    assert jsonl.exists() and blob.exists()
+    assert any(_KEPT in line and str(jsonl) in line for line in said), said
+
+
+def test_claude_keeps_a_session_whose_data_blob_upload_was_skipped(tmp):
+    projects = Path(tmp) / "projects"
+    uuid = "qq02-skip"
+    jsonl = _write(projects / "p" / f"{uuid}.jsonl",
+                   _session_body(_claude_entries()), days_old=10)
+    _write(projects / "p" / uuid / "kept.json", "{}")
+    blob = _write(projects / "p" / uuid / "skipped.json", "{}")
+    dest, client, said = _skipping_dest("skipped.json")
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, dest, _cutoff()) == (2, 0, 0, 0)
+    assert dest.skipped == [f"p/{uuid}/data/skipped.json"]
+    assert f"p/{uuid}/data/kept.json.xz" in client.objects
+    assert jsonl.exists() and blob.exists()
+    assert any(_KEPT in line for line in said), said
+
+
+def test_claude_keeps_a_multi_family_session_one_route_silently_skipped(tmp):
+    """The claude bucket holds everything; the zai bucket never got the
+    transcript. Every route the session went to must hold every object."""
+    projects = Path(tmp) / "projects"
+    uuid = "qq03-multi"
+    jsonl = _write(projects / "p" / f"{uuid}.jsonl",
+                   _session_for("claude-opus-5", "glm-5.3-flash"), days_old=10)
+    _write(projects / "p" / uuid / "tasks.json", "{}")
+    dest, zai, client, zai_client, said = _multi_family_route_pair(
+        skip=(f"{uuid}.jsonl",))
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (3, 0, 0, 0)
+    assert zai.skipped == [f"p/{uuid}/{uuid}.jsonl"]
+    assert f"p/{uuid}/{uuid}.jsonl.xz" in client.objects
+    assert zai_client.objects.keys() == {f"p/{uuid}/data/tasks.json.xz"}
+    assert jsonl.exists() and (projects / "p" / uuid / "tasks.json").exists()
+    assert any(_KEPT in line for line in said), said
+
+
+def test_claude_keeps_a_multi_family_session_one_route_skipped_the_data(tmp):
+    projects = Path(tmp) / "projects"
+    uuid = "qq04-multi"
+    jsonl = _write(projects / "p" / f"{uuid}.jsonl",
+                   _session_for("claude-opus-5", "glm-5.3-flash"), days_old=10)
+    _write(projects / "p" / uuid / "tasks.json", "{}")
+    dest, zai, _, _, said = _multi_family_route_pair(skip=("tasks.json",))
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (3, 0, 0, 0)
+    assert zai.skipped == [f"p/{uuid}/data/tasks.json"]
+    assert jsonl.exists() and (projects / "p" / uuid / "tasks.json").exists()
+    assert any(_KEPT in line for line in said), said
+
+
+def test_claude_keeps_an_orphan_dir_whose_upload_was_silently_skipped(tmp):
+    projects = Path(tmp) / "projects"
+    orphan = projects / "p" / "qq05-orphan"
+    _write(orphan / "wire.jsonl", _session_body(_claude_entries()))
+    skipped = _write(orphan / "out.txt", "left behind")
+    _age(orphan, 10)
+    dest, client, said = _skipping_dest("out.txt")
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, dest, _cutoff()) == (1, 0, 0, 0)
+    assert dest.skipped == ["p/qq05-orphan/data/out.txt"]
+    assert "p/qq05-orphan/data/wire.jsonl.xz" in client.objects
+    assert orphan.exists() and skipped.exists()
+    assert any(_KEPT in line and str(orphan) in line for line in said), said
+
+
+def test_claude_keeps_a_multi_family_orphan_dir_one_route_skipped(tmp):
+    projects = Path(tmp) / "projects"
+    orphan = projects / "p" / "qq06-orphan"
+    _write(orphan / "wire.jsonl", _session_for("claude-opus-5", "glm-5.3-flash"))
+    _write(orphan / "out.txt", "left behind")
+    _age(orphan, 10)
+    dest, zai, _, zai_client, said = _multi_family_route_pair(skip=("out.txt",))
+    with sandbox(_CLAUDE, PROJECTS_DIR=projects,
+                 PROVIDER_CACHE=Path(tmp) / "providers.json"):
+        assert _CLAUDE.archive_projects(dest, zai, _cutoff()) == (3, 0, 0, 0)
+    assert zai.skipped == ["p/qq06-orphan/data/out.txt"]
+    assert "p/qq06-orphan/data/out.txt.xz" not in zai_client.objects
+    assert orphan.exists()
+    assert any(_KEPT in line for line in said), said
 
 
 def test_claude_on_a_machine_with_no_projects_dir(tmp):
@@ -1135,19 +1277,21 @@ def _stored(dest, path, key):
 def test_codex_keeps_a_stale_rollout_the_bucket_does_not_have(tmp):
     """`_retire_local` refuses without proof the object is stored."""
     path = _write(Path(tmp) / "rollout.jsonl", "{}\n", days_old=10)
-    dest, _, _ = _dest()
+    dest, _, said = _dest()
     assert not _CODEX._retire_local(path, "sessions/h/t/wire.jsonl", dest, _cutoff())
     assert path.exists()
+    assert any(_KEPT in line and str(path) in line for line in said), said
 
 
 def test_codex_keeps_a_stale_rollout_whose_stored_bytes_are_older(tmp):
     """The object exists but was stored from an earlier state of the file."""
     path = _write(Path(tmp) / "rollout.jsonl", "{}\n", days_old=10)
-    dest, _, _ = _dest()
+    dest, _, said = _dest()
     _stored(dest, path, "sessions/h/t/wire.jsonl")
     dest.manifest["sessions/h/t/wire.jsonl.xz"][0] -= 1
     assert not _CODEX._retire_local(path, "sessions/h/t/wire.jsonl", dest, _cutoff())
     assert path.exists()
+    assert any(_KEPT in line and str(path) in line for line in said), said
 
 
 def test_codex_keeps_a_fresh_rollout_that_is_in_the_bucket(tmp):
@@ -1721,6 +1865,39 @@ def test_kimi_counts_a_failed_legacy_session_upload_and_keeps_it(tmp):
     assert any("uuid_dir" in line for line in said)
 
 
+def test_kimi_legacy_keeps_a_session_whose_upload_was_silently_skipped(tmp):
+    """The wire went up; a sibling file did not and nothing said so."""
+    kimi_dir = Path(tmp) / "kimi"
+    sessions = kimi_dir / "sessions"
+    uuid_dir = sessions / "hash1" / "uuid-1"
+    _write(uuid_dir / "wire.jsonl", "{}\n", days_old=10)
+    notes = _write(uuid_dir / "notes.txt", "not uploaded")
+    dest, client, said = _skipping_dest("notes.txt")
+    with sandbox(_KIMI, KIMI_DIR=kimi_dir, SESSIONS_DIR=sessions):
+        assert _KIMI.archive_sessions(dest, _cutoff()) == (1, 0, 0)
+    assert dest.skipped == ["sessions/hash1/uuid-1/notes.txt"]
+    assert "sessions/hash1/uuid-1/wire.jsonl.xz" in client.objects
+    assert uuid_dir.exists() and notes.exists()
+    assert any(_KEPT in line and str(uuid_dir) in line for line in said), said
+
+
+def test_kimi_legacy_reuploads_a_same_size_changed_file_before_deleting(tmp):
+    """The bucket's older copy is the same length; only the upload, then the
+    verification of the new bytes, lets the session go."""
+    kimi_dir = Path(tmp) / "kimi"
+    sessions = kimi_dir / "sessions"
+    uuid_dir = sessions / "hash1" / "uuid-1"
+    _write(uuid_dir / "wire.jsonl", "{}\n", days_old=10)
+    blob = _write(uuid_dir / "blob.bin", b"NEW!")
+    dest, client, _ = _dest()
+    client.objects = {"sessions/hash1/uuid-1/blob.bin": b"OLD!"}
+    dest.inventory()
+    with sandbox(_KIMI, KIMI_DIR=kimi_dir, SESSIONS_DIR=sessions):
+        assert _KIMI.archive_sessions(dest, _cutoff()) == (2, 1, 0)
+    assert client.objects["sessions/hash1/uuid-1/blob.bin"] == b"NEW!"
+    assert not uuid_dir.exists() and not blob.exists()
+
+
 def test_kimi_archive_sessions_on_a_machine_with_no_sessions_dir(tmp):
     dest, _, _ = _dest()
     with sandbox(_KIMI, KIMI_DIR=Path(tmp) / "absent",
@@ -1768,6 +1945,18 @@ def test_kimi_archive_user_history_on_a_machine_with_no_such_dir(tmp):
     dest, _, _ = _dest()
     with sandbox(_KIMI, USER_HISTORY_DIR=Path(tmp) / "absent"):
         assert _KIMI.archive_user_history(dest, 0) == (0, 0, 0)
+
+
+def test_kimi_user_history_keeps_a_file_whose_upload_was_silently_skipped(tmp):
+    hist = Path(tmp) / "user-history"
+    stale = _write(hist / "h.jsonl", "{}\n", days_old=10)
+    dest, client, said = _skipping_dest("h.jsonl")
+    with sandbox(_KIMI, USER_HISTORY_DIR=hist):
+        assert _KIMI.archive_user_history(dest, _cutoff()) == (0, 0, 0)
+    assert dest.skipped == ["user-history/h.jsonl"]
+    assert client.objects == {}
+    assert stale.exists()
+    assert any(_KEPT in line and str(stale) in line for line in said), said
 
 
 def _kimi_code_session(kc, bucket, session, workdir=None):
@@ -1894,6 +2083,85 @@ def test_kimi_code_counts_a_failed_upload_of_each_kind(tmp):
             uploaded, _, failed = _KIMI.archive_kimi_code_sessions(dest, _cutoff(1))
         assert (uploaded, failed) == (3, 1), marker
         assert any(marker in line for line in said), marker
+
+
+_KC_KEYS = (
+    ("main wire", "sessions/0123456789ab/ses_1/wire.jsonl.xz"),
+    ("subagent wire",
+     "sessions/0123456789ab/ses_1/subagents/agent-1/wire.jsonl.xz"),
+    ("blob",
+     "sessions/0123456789ab/ses_1/subagents/agent-1/blobs/shot.json.xz"),
+    ("state", "sessions/0123456789ab/ses_1/state.json.xz"),
+)
+
+
+def _old_kimi_code_session(kc):
+    sess = _kimi_code_session(kc, "wd_p_0123456789ab", "ses_1")
+    for wire in sess.rglob("wire.jsonl"):
+        _age(wire, 10)
+    return sess
+
+
+def _kc_files(sess):
+    return sorted(p for p in sess.rglob("*") if p.is_file())
+
+
+def test_kimi_code_keeps_a_stale_session_whose_upload_failed(tmp):
+    """A transcript that never reached the bucket is the only copy."""
+    for index, (kind, key) in enumerate(_KC_KEYS):
+        kc = Path(tmp) / f"kimi-code-{index}"
+        sess = _old_kimi_code_session(kc)
+        before = _kc_files(sess)
+        dest, client, said = _dest()
+        client.fail_puts.add(key)
+        with sandbox(_KIMI, KIMI_CODE_DIR=kc, KC_SESSIONS_DIR=kc / "sessions"):
+            counts = _KIMI.archive_kimi_code_sessions(dest, _cutoff())
+        assert counts == (3, 0, 1), kind
+        assert key not in client.objects, kind
+        assert _kc_files(sess) == before, kind
+        assert any(_KEPT in line and str(sess) in line for line in said), kind
+
+
+def test_kimi_code_keeps_a_stale_session_whose_upload_was_skipped(tmp):
+    """Nothing raised and nothing counted: only the gate can keep it."""
+    for index, (kind, key) in enumerate(_KC_KEYS):
+        kc = Path(tmp) / f"kimi-code-{index}"
+        sess = _old_kimi_code_session(kc)
+        before = _kc_files(sess)
+        dest, client, said = _skipping_dest(key[:-len(".xz")])
+        with sandbox(_KIMI, KIMI_CODE_DIR=kc, KC_SESSIONS_DIR=kc / "sessions"):
+            counts = _KIMI.archive_kimi_code_sessions(dest, _cutoff())
+        assert counts == (3, 0, 0), kind
+        assert dest.skipped == [key[:-len(".xz")]], kind
+        assert key not in client.objects, kind
+        assert _kc_files(sess) == before, kind
+        assert any(_KEPT in line and str(sess) in line for line in said), kind
+
+
+def test_kimi_code_keeps_a_session_when_only_one_of_two_blobs_is_held(tmp):
+    kc = Path(tmp) / "kimi-code"
+    sess = _old_kimi_code_session(kc)
+    other = _write(sess / "agents" / "agent-1" / "blobs" / "other.json", "{}")
+    dest, client, said = _skipping_dest("blobs/other.json")
+    with sandbox(_KIMI, KIMI_CODE_DIR=kc, KC_SESSIONS_DIR=kc / "sessions"):
+        assert _KIMI.archive_kimi_code_sessions(dest, _cutoff()) == (4, 0, 0)
+    assert dest.skipped == ["sessions/0123456789ab/ses_1/subagents/agent-1/"
+                            "blobs/other.json"]
+    assert any(key.endswith("blobs/shot.json.xz") for key in client.objects)
+    assert sess.exists() and other.exists()
+    assert any(_KEPT in line for line in said), said
+
+
+def test_kimi_code_deletes_a_stale_session_once_every_object_is_held(tmp):
+    """The counterpart: the same session, uploads working, is let go."""
+    kc = Path(tmp) / "kimi-code"
+    sess = _old_kimi_code_session(kc)
+    dest, client, said = _dest()
+    with sandbox(_KIMI, KIMI_CODE_DIR=kc, KC_SESSIONS_DIR=kc / "sessions"):
+        assert _KIMI.archive_kimi_code_sessions(dest, _cutoff()) == (4, 1, 0)
+    assert sorted(client.objects) == sorted(key for _, key in _KC_KEYS)
+    assert not sess.exists()
+    assert not any(_KEPT in line for line in said)
 
 
 def test_kimi_archive_kimi_code_sessions_on_a_machine_without_them(tmp):

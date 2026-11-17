@@ -85,8 +85,8 @@ def load_project_map():
     project paths without needing kimi.json themselves.
     '''
     try:
-        data = json.loads((KIMI_DIR / 'kimi.json').read_text())
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        data = json.loads((KIMI_DIR / 'kimi.json').read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return {}
     out = {}
     for work_dir in data.get('work_dirs', []):

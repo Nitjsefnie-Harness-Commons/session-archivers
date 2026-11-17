@@ -8,14 +8,14 @@ name: tag
 # after bumping __version__, and a forgotten tag means a version bump that
 # never ships.
 #
-# So this composes with it rather than replacing it: on every push to main it
-# tags __version__ if that tag does not exist yet, and then STARTS release.yml
-# by hand. That last part is not belt-and-braces: a `v*` tag pushed with the
-# built-in GITHUB_TOKEN does not trigger release.yml at all. GitHub suppresses
-# workflow runs from token-authored events so a workflow cannot loop on its
-# own pushes, and `workflow_dispatch` is one of the two documented exceptions
-# to that rule -- which is why the last step below dispatches rather than
-# relying on the push.
+# So this composes with it rather than replacing it: on each push to main the
+# gates run on, it tags __version__ if that tag does not exist yet, and then
+# STARTS release.yml by hand. That last part is not belt-and-braces: a `v*`
+# tag pushed with the built-in GITHUB_TOKEN does not trigger release.yml at
+# all. GitHub suppresses workflow runs from token-authored events so a
+# workflow cannot loop on its own pushes, and `workflow_dispatch` is one of
+# the two documented exceptions to that rule -- which is why the last step
+# below dispatches rather than relying on the push.
 #
 # Without it the failure is silent and total: the tag lands, the version looks
 # shipped, no release is ever cut, and nothing goes red. That happened to
@@ -32,9 +32,14 @@ name: tag
 
 on:
   push:
-    # No path filter: a push that supersedes the version bump cancels the
-    # bump's gates, so the superseding commit must carry the pending tag.
+    # The gates' own filter, not __init__.py alone: a push that supersedes the
+    # version bump cancels the bump's gates, so the superseding commit must
+    # carry the pending tag, and a push the gates ignore cancels nothing.
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
   workflow_dispatch:
     inputs:
       sha:

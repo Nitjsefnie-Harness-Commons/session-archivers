@@ -69,11 +69,14 @@ jobs:
       - name: Build the wheel
         # The wheel records each file's date and permission bits. The dates
         # come from SOURCE_DATE_EPOCH, the tagged commit's own time; the
-        # bits are set to git's (644, 755 if executable) whatever umask
-        # made the checkout or runs the build; pyproject.toml pins the
-        # backend. So these commands, run on a checkout of the tag with
-        # Python 3.13, reproduce the published hash.
+        # bits of tracked files are set to git's (644, 755 if executable)
+        # whatever umask made the checkout; everything the build generates
+        # gets umask 022, after the rm drops the build/ and egg-info that
+        # `pip install .` left under its own umask, which setuptools would
+        # reuse; pyproject.toml pins the backend. So these commands, run on
+        # a checkout of the tag with Python 3.13, reproduce the published hash.
         run: |
+          rm -rf -- build session_archivers.egg-info
           umask 022
           git ls-files -z | xargs -0 chmod a+rX,go-w --
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"

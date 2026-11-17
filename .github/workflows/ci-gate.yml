@@ -14,8 +14,9 @@ permissions:
   contents: read
 
 concurrency:
-  # A newer head supersedes its pull request's run; no push cancels another.
-  group: ci-gate-${{ github.event.pull_request.number || (github.event_name == 'push' && github.sha) || github.ref }}
+  # A newer head supersedes its pull request's run; no push or dispatch run
+  # cancels another.
+  group: ci-gate-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:

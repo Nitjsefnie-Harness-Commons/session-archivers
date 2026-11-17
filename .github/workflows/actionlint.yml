@@ -52,10 +52,14 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      ACTIONLINT_VERSION: 1.7.12
-      # sha256 of actionlint_1.7.12_linux_amd64.tar.gz, from the release's
-      # own checksums file. Bump both together.
-      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      # Nitjsefnie-OSC/actionlint, not stock rhysd/actionlint: upstream 1.7.12
+      # plus rhysd/actionlint#654, which accepts the `queue: max` claim.yml
+      # sets; stock 1.7.12 rejects that key. Return to upstream once a
+      # release carries it.
+      ACTIONLINT_VERSION: 1.7.12-queue.1
+      # sha256 of actionlint_1.7.12-queue.1_linux_amd64.tar.gz, from the
+      # release's own checksums file. Bump both together.
+      ACTIONLINT_SHA256: dcc2c42a7caaa197dfe63584a3851f62ef260f80b2cf221baaf05479661e1521
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -74,7 +78,7 @@ jobs:
         run: |
           tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
           curl -fsSL --retry 3 -o "$tarball" \
-            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+            "https://github.com/Nitjsefnie-OSC/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
           echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum -c -
           tar -xzf "$tarball" actionlint
           ./actionlint --version

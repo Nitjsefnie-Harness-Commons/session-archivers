@@ -42,12 +42,20 @@
 # ─── .github/workflows ───
 !/.github/
 !/.github/workflows/
+!/.github/PULL_REQUEST_TEMPLATE.md
+!/.github/comment-share.json
 !/.github/dependabot.yml
+!/.github/size-baseline.json
 !/.github/workflows/actionlint.yml
 !/.github/workflows/audit.yml
+!/.github/workflows/claim.yml
 !/.github/workflows/codeql.yml
+!/.github/workflows/comment-share.yml
 !/.github/workflows/lint.yml
+!/.github/workflows/pin-guard.yml
+!/.github/workflows/pr-gate.yml
 !/.github/workflows/release.yml
+!/.github/workflows/size-baseline.yml
 !/.github/workflows/tag.yml
 !/.github/workflows/tests.yml
 !/.github/workflows/types.yml

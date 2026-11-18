@@ -34,7 +34,7 @@ on:
   push:
     # Not __init__.py alone: a later push carries a refused release's tag,
     # and one finding the tag already there runs `bump`. Not docs-only
-    # pushes: ci gate runs no leg on them, yet reports `aggregate` green.
+    # pushes: ci gate skips its legs there, and the waiter ends red on them.
     branches: [main]
     paths-ignore:
       - '**/*.md'
@@ -148,9 +148,10 @@ jobs:
         #   - it skips only runs named exactly as this job, or it would wait
         #     on a job waiting on it; `tag-...` names still count;
         #   - each `required` gate must report and conclude `success`, so
-        #     it cannot tag before CI is scheduled, nor on a skipped gate.
-        #     The one is ci gate's `aggregate`: its legs' runs appear only
-        #     once `classify` ends, so "all reported runs passed" is early;
+        #     it cannot tag before CI is scheduled, nor on a skipped gate,
+        #     such as every leg on a docs-only commit a dispatch names. A
+        #     leg's runs are `<leg> / <job>`, a matrix job's `... (<legs>)`;
+        #     `aggregate` adds the actionlint leg and conflict-marker check;
         #   - every other run must end success, skipped or neutral.
         #     `cancelled` counts as failure: it checked nothing;
         #   - it refuses as soon as any completed run, required or not,
@@ -158,10 +159,12 @@ jobs:
         #     none has;
         #   - a required gate still unreported at the deadline is named.
         run: |
-          required=(aggregate)
+          required=('lint / pycodestyle' 'lint / pylint' 'types / pyright'
+            'audit / pip-audit' 'codeql / analyze' 'tests / suites'
+            'tests / wheel' 'tests / coverage' aggregate)
           gate_of() {
             for gate in "${required[@]}"; do
-              case "$1" in "$gate") echo "$gate"; return ;; esac
+              case "$1" in "$gate" | "$gate ("*) echo "$gate"; return ;; esac
             done
           }
           deadline=$(( SECONDS + 45 * 60 ))
@@ -192,7 +195,7 @@ jobs:
             done <<< "$runs"
             missing=""
             for gate in "${required[@]}"; do
-              if [ -z "${seen[$gate]:-}" ]; then missing+=" $gate"; fi
+              if [ -z "${seen[$gate]:-}" ]; then missing+=" '$gate'"; fi
             done
 
             if [ -n "$bad" ]; then

@@ -94,14 +94,14 @@ python3 .github/scripts/ratchet_thresholds.py --self-test
   cannot see `main` move after the last green run: that takes the ruleset
   requiring branches to be up to date, or something that runs the check
   again on every push to `main`, neither of which this repository's files set
-  up. A called leg reports as `<leg> / <job>`,
-  such as `lint / pylint`, so `tests`, `lint`, `types` and `codeql` keep a standalone
-  pull-request run for the bare names the ruleset requires until it requires
-  `aggregate`; on their own, `audit` runs only on its daily schedule or by
-  dispatch and `actionlint` only by dispatch. Each leg keys its concurrency group on
-  `github.workflow`, so its called and standalone runs never cancel each
-  other. A new gate workflow needs `workflow_call`, a leg in `ci-gate.yml`, an
-  entry in that job's `needs` and one in the script's `LEGS`.
+  up. A called leg reports as `<leg> / <job>`, such as `lint / pylint`, so
+  `tests`, `lint`, `types` and `codeql` keep a standalone pull-request run for
+  the bare names the ruleset requires until it requires `aggregate`; on their
+  own, `audit` runs only on its daily schedule or by dispatch and `actionlint`
+  only by dispatch. Each leg keys its concurrency group on `github.workflow`, so
+  its called and standalone runs never cancel each other. A new gate workflow
+  needs `workflow_call`, a leg in `ci-gate.yml`, an entry in that job's `needs`
+  and one in the script's `LEGS`.
 - `git ls-files` sees only tracked files, so stage a new module before running
   pylint and pycodestyle: an untracked one is checked by nobody. (`git ls-files
   -co --exclude-standard` includes untracked files that are not ignored.)

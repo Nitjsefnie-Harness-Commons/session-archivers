@@ -349,7 +349,7 @@ jobs:
           git -c core.hooksPath=/dev/null \
             -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -q -m "chore(release): open $next after releasing $released" -- "$file"
+            commit -q -m "chore: open $next after releasing $released" -- "$file"
           if [ "$(git diff --numstat HEAD^ HEAD)" != "$(printf '1\t1\t%s' "$file")" ] \
             || [ "$(git diff -U0 HEAD^ HEAD | grep -cxF -e "-$old" -e "+$new")" != 2 ]; then
             echo "The bump commit changes more than the one version line:" >&2

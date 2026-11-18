@@ -5,7 +5,9 @@ reasons a reviewer judges. The XML lists every statement of the measured
 package, so a line it omits is not executable; the diff numbers lines as the
 measured merge tree does. A changed module the XML never names is listed,
 lest a path-spelling mismatch read as nothing measured. A path git quotes
-(tab, quote, backslash) exits 1 rather than be misread.
+(tab, quote, backslash) exits 1 rather than be misread. `--self-test` runs
+the parsers over inline fixtures; ci-gate.yml's aggregate job runs it, as
+no suite under tests/ covers this script.
 """
 import argparse
 import re
@@ -17,8 +19,8 @@ MEASURED_PACKAGE = 'session_archivers/'
 _HUNK = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
 
 
-def executable_lines(coverage_xml: Path) -> dict[str, dict[int, int]]:
-    root = ET.parse(coverage_xml).getroot()
+def executable_lines(coverage_xml: str | bytes) -> dict[str, dict[int, int]]:
+    root = ET.fromstring(coverage_xml)
     if root.tag != 'coverage':
         raise ValueError('root is not <coverage>')
     measured: dict[str, dict[int, int]] = {}
@@ -79,8 +81,11 @@ def render(measured: dict[str, dict[int, int]], added: dict[str, set[int]]) -> s
     out = ['### Coverage of this change', '']
     if total:
         percent = min(100.0 * covered / total, 100.0 if covered == total else 99.9)
-        out += [f'**{percent:.1f}%** of added executable lines covered ({covered}/{total}).', '',
+        subject = 'measured added executable lines' if unmeasured else 'added executable lines'
+        out += [f'**{percent:.1f}%** of {subject} covered ({covered}/{total}).', '',
                 '| File | Covered | Added | Missed lines |', '| --- | ---: | ---: | --- |', *rows]
+    elif unmeasured:
+        out.append('Nothing was measured: the coverage report does not name the changed modules below.')
     else:
         out.append(f'No executable line was added under `{MEASURED_PACKAGE}`, the only code the coverage job measures.')
     if unmeasured:
@@ -88,15 +93,75 @@ def render(measured: dict[str, dict[int, int]], added: dict[str, set[int]]) -> s
     return '\n'.join(out) + '\n'
 
 
+SELF_TEST_DIFF = '''\
+diff --git a/session_archivers/a_gone.py b/session_archivers/a_gone.py
+deleted file mode 100644
+--- a/session_archivers/a_gone.py
++++ /dev/null
+@@ -1,2 +0,0 @@
+-gone = 1
+--- a
+diff --git a/session_archivers/old.py b/session_archivers/new.py
+similarity index 80%
+rename from session_archivers/old.py
+rename to session_archivers/new.py
+--- a/session_archivers/old.py
++++ b/session_archivers/new.py
+@@ -3 +3 @@ y = 2
+-z = 3
+\\ No newline at end of file
++z = 33
+\\ No newline at end of file
+diff --git a/session_archivers/mod.py b/session_archivers/mod.py
+--- a/session_archivers/mod.py
++++ b/session_archivers/mod.py
+@@ -2,0 +3,2 @@ b = 2
++++ b
++c = 3
+@@ -5,2 +7,3 @@
+ e = 5
++d = 4
+ f = 6
+'''
+
+
+def self_test() -> None:
+    added = added_lines(SELF_TEST_DIFF)
+    assert added == {'session_archivers/new.py': {3}, 'session_archivers/mod.py': {3, 4, 8}}, added
+    measured = executable_lines(
+        '<coverage><class filename="session_archivers/mod.py"><lines><line number="3" hits="1"/>'
+        '<line number="4" hits="0"/><line number="8" hits="0"/></lines></class>'
+        '<class filename="session_archivers/mod.py"><lines><line number="8" hits="2"/></lines></class></coverage>')
+    report = render(measured, added)
+    assert '**66.7%** of measured added executable lines covered (2/3).' in report, report
+    assert '| `session_archivers/mod.py` | 2 | 3 | 4 |' in report and '- `session_archivers/new.py`' in report, report
+    report = render(executable_lines('<coverage><class filename="session_archivers/other.py"><lines>'
+                                     '<line number="1" hits="1"/></lines></class></coverage>'), added)
+    assert 'Nothing was measured' in report and '- `session_archivers/mod.py`' in report and '%' not in report, report
+    for empty in ('<coverage/>', '<coverage><class filename="session_archivers/mod.py"><lines/></class></coverage>'):
+        try:
+            executable_lines(empty)
+        except ValueError:
+            continue
+        raise AssertionError(f'accepted a report with no line records: {empty}')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--coverage', required=True, type=Path, help='Cobertura XML from `coverage xml`')
-    parser.add_argument('--diff', required=True, type=Path, help='unified diff of the measured tree against its base')
+    parser.add_argument('--coverage', type=Path, help='Cobertura XML from `coverage xml`')
+    parser.add_argument('--diff', type=Path, help='unified diff of the measured tree against its base')
+    parser.add_argument('--self-test', action='store_true', help='check the parsers on inline fixtures')
     args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        print('diff_coverage self-test passed')
+        return 0
+    if args.coverage is None or args.diff is None:
+        parser.error('--coverage and --diff are required')
     try:
         # Only line numbers reach the report.
         added = added_lines(args.diff.read_bytes().decode('utf-8', errors='replace'))
-        report = render(executable_lines(args.coverage), added)
+        report = render(executable_lines(args.coverage.read_bytes()), added)
     except (OSError, ET.ParseError, ValueError) as error:
         print(f'diff coverage not reported: {error}', file=sys.stderr)
         return 1

@@ -118,9 +118,9 @@ python3 .github/scripts/diff_coverage.py --self-test
   dispatch. An allowlist or ignore entry therefore takes effect only once the
   trusted commit carries it: the pull request that adds it and the push that
   lands it on `main` (whose previous tip lacks it) are both scanned without
-  it, so a finding it suppresses still fails both. No fixture or example may carry a credential-shaped value; use
-  the reserved documentation values (`example.com`, `192.0.2.0/24`) for hosts
-  and addresses.
+  it, so a finding it suppresses still fails both. No fixture or example may
+  carry a credential-shaped value; use the reserved documentation values
+  (`example.com`, `192.0.2.0/24`) for hosts and addresses.
 - The coverage floor is a ratchet, not a target, recorded in
   `.github/ci-thresholds.json` with the total it was set from. On a push to
   `main` that measures more than 1.5 points above that total, the coverage job

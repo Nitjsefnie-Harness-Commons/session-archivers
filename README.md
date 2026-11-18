@@ -215,7 +215,7 @@ branches that need an unwritable filesystem to reach.
 | `pin test screen` | `Nitjsefnie-Actions/pin-guard`: comments on test lines that assert a pinned dependency version, tag, SHA or digest. |
 | `comment share` | `Nitjsefnie-Actions/comment-ratchet`: a pull request may not raise a tracked file's comment share above 15%, or above its record in `.github/comment-share.json`. |
 | `size baseline` | `Nitjsefnie-Actions/size-ratchet`: per-file line ceilings and the `tests/` line total, recorded in `.github/size-baseline.json`. |
-| `tag` | Runs on every push to `main` the gates run on (all but a push changing only `.md` files, `LICENSE` or `.gitignore`). A `.devN` `__version__` ends it green with nothing done. A release version `X.Y.Z` whose tag `vX.Y.Z` does not exist yet makes it wait for the named gates (`pycodestyle`, `pylint`, `pyright`, `pip-audit`, `analyze`, `suites`, `wheel`, `coverage`) to pass and every other check on that commit to end `success`, `skipped` or `neutral`, push `vX.Y.Z` and start `release`. Its `bump` job then commits `X.Y.(Z+1).dev0` to `main`, both after that push and on a push that finds `vX.Y.Z` already there; if `main` has already left `X.Y.Z`, it commits nothing. |
+| `tag` | Runs on every push to `main` but one changing only `.md` files, `LICENSE` or `.gitignore`. A `.devN` `__version__` ends it green with nothing done. A release version `X.Y.Z` whose tag `vX.Y.Z` does not exist yet makes it wait for `ci gate`'s `aggregate` check to pass and every other check on that commit to end `success`, `skipped` or `neutral`, push `vX.Y.Z` and start `release`. Its `bump` job then commits `X.Y.(Z+1).dev0` to `main`, both after that push and on a push that finds `vX.Y.Z` already there; if `main` has already left `X.Y.Z`, it commits nothing. |
 | `release` | Fires on that tag. A read-only `build` job runs every suite, builds the wheel reproducibly (pinned `setuptools`, `SOURCE_DATE_EPOCH` from the tagged commit, git's file modes on tracked files whatever the umask, and the `build/` and egg-info that the test install leaves removed first, so the build step's commands on a checkout of the tag with Python 3.13 give the published hash) and writes `SHA256SUMS`; a `publish` job, the only one holding write access, runs no repository code: it checks the wheel against `SHA256SUMS`, attests its build provenance, and publishes both. A release that already has assets is refused unless dispatched with `replace: true`, and a published immutable release is refused either way, since GitHub takes no asset on it; every refusal comes before the attestation. |
 
 **There is deliberately no speed gate here**, unlike the dashboard repos.
@@ -228,12 +228,12 @@ reshape the tests to suit a gate, the gate is omitted.
 Between releases `main` carries a development version, `X.Y.Z.devN`,
 which `tag` never tags. The commit that sets it to a release version
 `X.Y.Z` is the release; choosing patch, minor or major stays a judgement
-about what changed. `tag` waits for the named gates on that commit, tags
-it, starts `release`, which publishes from the tag, and then commits
-`X.Y.(Z+1).dev0` to `main`, so no later commit claims a published
-version. A later push the gates run on, landing before they finish on
-that commit, cancels them: `tag` then refuses that commit and tags the
-later one, if that push left `__version__` as it was. If the `.dev0` push is
+about what changed. `tag` waits for `ci gate`'s `aggregate` check on that
+commit, tags it, starts `release`, which publishes from the tag, and then
+commits `X.Y.(Z+1).dev0` to `main`, so no later commit claims a published
+version. If a check on that commit fails, `tag` refuses it; a later push
+that changes more than documentation and leaves `__version__` as it was
+is tagged in its place once its own checks pass. If the `.dev0` push is
 refused because `main` moved, re-run the failed `bump` job; the next push
 the gates run on, while `main` still carries `X.Y.Z`, makes it too.
 

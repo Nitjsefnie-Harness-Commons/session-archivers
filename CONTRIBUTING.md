@@ -114,13 +114,15 @@ python3 .github/scripts/diff_coverage.py --self-test
   (`gitleaks detect --verbose --redact`). It ignores a `gitleaks:allow` comment
   and every diff attribute set in the tree, and reads `.gitleaks.toml` and
   `.gitleaksignore` only from the trusted commit: the pull request's base, the
-  previous tip of `main` on a push, the scanned commit on a schedule or
-  dispatch. An allowlist or ignore entry therefore takes effect only once the
-  trusted commit carries it: the pull request that adds it and the push that
-  lands it on `main` (whose previous tip lacks it) are both scanned without
-  it, so a finding it suppresses still fails both. No fixture or example may
-  carry a credential-shaped value; use the reserved documentation values
-  (`example.com`, `192.0.2.0/24`) for hosts and addresses.
+  previous tip of `main` on a push, the tip of `main` on a schedule or
+  dispatch, whichever branch the dispatch scans (default rules and no ignore
+  list when that read fails). An allowlist or ignore entry therefore takes
+  effect only once the trusted commit carries it: the pull request that adds
+  it and the push that lands it on `main` (whose previous tip lacks it) are
+  both scanned without it, so a finding it suppresses still fails both. No
+  fixture or example may carry a credential-shaped value; use the reserved
+  documentation values (`example.com`, `192.0.2.0/24`) for hosts and
+  addresses.
 - The coverage floor is a ratchet, not a target, recorded in
   `.github/ci-thresholds.json` with the total it was set from. On a push to
   `main` that measures more than 1.5 points above that total, the coverage job

@@ -32,9 +32,9 @@ name: tag
 
 on:
   push:
-    # The gates' own filter, not __init__.py alone: a push that supersedes the
-    # version bump cancels the bump's gates, so the superseding commit must
-    # carry the pending tag, and a push the gates ignore cancels nothing.
+    # Not __init__.py alone: a later push carries a refused release's tag,
+    # and one finding the tag already there runs `bump`. Not docs-only
+    # pushes: ci gate runs no leg on them, yet reports `aggregate` green.
     branches: [main]
     paths-ignore:
       - '**/*.md'
@@ -149,20 +149,19 @@ jobs:
         #     on a job waiting on it; `tag-...` names still count;
         #   - each `required` gate must report and conclude `success`, so
         #     it cannot tag before CI is scheduled, nor on a skipped gate.
-        #     A matrix gate's runs are named `<job> (<legs>)`. actionlint
-        #     is absent: its push trigger covers workflow files only;
+        #     The one is ci gate's `aggregate`: its legs' runs appear only
+        #     once `classify` ends, so "all reported runs passed" is early;
         #   - every other run must end success, skipped or neutral.
-        #     `cancelled` counts as failure: a cancelled run means a newer
-        #     push superseded this SHA;
+        #     `cancelled` counts as failure: it checked nothing;
         #   - it refuses as soon as any completed run, required or not,
         #     breaks its rule above, and waits for pending runs only while
         #     none has;
         #   - a required gate still unreported at the deadline is named.
         run: |
-          required=(pycodestyle pylint pyright pip-audit analyze suites wheel coverage)
+          required=(aggregate)
           gate_of() {
             for gate in "${required[@]}"; do
-              case "$1" in "$gate" | "$gate ("*) echo "$gate"; return ;; esac
+              case "$1" in "$gate") echo "$gate"; return ;; esac
             done
           }
           deadline=$(( SECONDS + 45 * 60 ))

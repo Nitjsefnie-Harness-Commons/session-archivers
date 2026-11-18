@@ -71,6 +71,10 @@ git grep -nI -E '^(<{7}( |$)|>{7}( |$)|={7}$)' -- .
 export SESSION_ARCHIVERS_HEAD_SHA="$(git rev-parse HEAD)"
 python3 .github/scripts/gate_base_freshness.py
 python3 .github/scripts/commit_scopes.py
+
+# ci gate, aggregate job: the patch coverage reporter's parsers on inline
+# fixtures
+python3 .github/scripts/diff_coverage.py --self-test
 ```
 
 - `ci gate` calls `tests`, `lint`, `types`, `audit`, `codeql` and `actionlint`

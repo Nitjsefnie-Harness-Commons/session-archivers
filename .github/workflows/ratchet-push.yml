@@ -137,6 +137,8 @@ jobs:
               sys.exit("refusing: schema_version or coverage.python.cell differs from main's")
           if new_py['floor'] < old_py['floor'] or new_py['measured'] <= old_py['measured']:
               sys.exit("refusing: the floor is below main's or the measured total is not above it")
+          if new_py['floor'] > new_py['measured']:
+              sys.exit('refusing: the floor is above its own measured total')
           PY
           [ "$rc" != 3 ] || drop "the merged $file is not valid JSON"
           [ "$rc" = 0 ] || exit 1

@@ -136,10 +136,11 @@ python3 .github/scripts/ratchet_thresholds.py --self-test
   merge that is not valid JSON. A push rejected while `main` stood still fails
   the run; one rejected after `main` moved drops the raise. A record that does
   not raise `main`'s (a floor below it, a measured total not above it, another
-  `schema_version` or cell, a value that is not a finite number) fails the run
-  and pushes nothing. A dropped raise returns with the next push that measures
-  more than 1.5 points above the recorded total. A hand raise is an edit to
-  that file; write tests rather than lower it to fit a result.
+  `schema_version` or cell, a value that is not a finite number) or whose floor
+  is above its own measured total fails the run and pushes nothing. A dropped
+  raise returns with the next push that measures more than 1.5 points above
+  the recorded total. A hand raise is an edit to that file; write tests rather
+  than lower it to fit a result.
 - Four more workflows check a pull request and need GitHub to run, so they
   have no local command: `pr gate` (the description against
   `.github/PULL_REQUEST_TEMPLATE.md`, Conventional Commits subjects, issue

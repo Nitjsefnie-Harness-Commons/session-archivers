@@ -17,7 +17,7 @@ on:
   workflow_call:
   workflow_dispatch:
 
-# Least privilege: the default token can be read/write.
+# Least privilege: this job only reads the tree.
 permissions:
   contents: read
 

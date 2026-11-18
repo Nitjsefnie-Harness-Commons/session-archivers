@@ -14,12 +14,6 @@ on:
 
 permissions: {}
 
-concurrency:
-  # Queued, never cancelled: tag.yml refuses a cancelled check on main's tip.
-  group: ratchet-push
-  cancel-in-progress: false
-  queue: max
-
 jobs:
   push:
     if: >-
@@ -28,6 +22,12 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.conclusion == 'success'
     environment: main-push
+    # On the job, so only admitted runs share the group. Up to 100 wait;
+    # a further one is cancelled, a check tag.yml refuses on main's tip.
+    concurrency:
+      group: ratchet-push
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

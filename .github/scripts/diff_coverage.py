@@ -101,12 +101,12 @@ deleted file mode 100644
 @@ -1,2 +0,0 @@
 -gone = 1
 --- a
-diff --git a/session_archivers/old.py b/session_archivers/new.py
+diff --git a/session_archivers/old.py b/session_archivers/new name.py
 similarity index 80%
 rename from session_archivers/old.py
-rename to session_archivers/new.py
+rename to session_archivers/new name.py
 --- a/session_archivers/old.py
-+++ b/session_archivers/new.py
++++ b/session_archivers/new name.py\t
 @@ -3 +3 @@ y = 2
 -z = 3
 \\ No newline at end of file
@@ -127,23 +127,32 @@ diff --git a/session_archivers/mod.py b/session_archivers/mod.py
 
 def self_test() -> None:
     added = added_lines(SELF_TEST_DIFF)
-    assert added == {'session_archivers/new.py': {3}, 'session_archivers/mod.py': {3, 4, 8}}, added
+    assert added == {'session_archivers/new name.py': {3}, 'session_archivers/mod.py': {3, 4, 8}}, added
+    added.update({'session_archivers/data.json': {1}, 'tests/test_x.py': {1}})
     measured = executable_lines(
         '<coverage><class filename="session_archivers/mod.py"><lines><line number="3" hits="1"/>'
-        '<line number="4" hits="0"/><line number="8" hits="0"/></lines></class>'
-        '<class filename="session_archivers/mod.py"><lines><line number="8" hits="2"/></lines></class></coverage>')
+        '<line number="4" hits="0"/><line number="8" hits="2"/></lines></class>'
+        '<class filename="session_archivers/mod.py"><lines><line number="8" hits="0"/></lines></class></coverage>')
     report = render(measured, added)
     assert '**66.7%** of measured added executable lines covered (2/3).' in report, report
-    assert '| `session_archivers/mod.py` | 2 | 3 | 4 |' in report and '- `session_archivers/new.py`' in report, report
+    assert '| `session_archivers/mod.py` | 2 | 3 | 4 |' in report and '- `session_archivers/new name.py`' in report, report
+    assert '- `session_archivers/mod.py`' not in report and '| `session_archivers/new name.py`' not in report, report
+    assert 'data.json' not in report and 'test_x.py' not in report, report
     report = render(executable_lines('<coverage><class filename="session_archivers/other.py"><lines>'
                                      '<line number="1" hits="1"/></lines></class></coverage>'), added)
     assert 'Nothing was measured' in report and '- `session_archivers/mod.py`' in report and '%' not in report, report
-    for empty in ('<coverage/>', '<coverage><class filename="session_archivers/mod.py"><lines/></class></coverage>'):
+    report = render({'m.py': {**dict.fromkeys(range(1, 2000), 1), 2000: 0}}, {'m.py': set(range(1, 2001))})
+    assert '**99.9%**' in report, report
+    line = '<line number="{}" hits="{}"/>'
+    for bad in ('<coverage/>', '<coverage><class filename="m.py"><lines/></class></coverage>',
+                f'<report><class filename="m.py">{line.format(1, 1)}</class></report>',
+                f'<coverage><class filename="m.py">{line.format(0, 1)}</class></coverage>',
+                f'<coverage><class filename="m.py">{line.format(1, -1)}</class></coverage>', '+++ "b/m\\tn.py"'):
         try:
-            executable_lines(empty)
+            (added_lines if bad.startswith('+') else executable_lines)(bad)
         except ValueError:
             continue
-        raise AssertionError(f'accepted a report with no line records: {empty}')
+        raise AssertionError(f'accepted {bad}')
 
 
 def main() -> int:

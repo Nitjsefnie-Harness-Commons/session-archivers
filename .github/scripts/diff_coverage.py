@@ -126,6 +126,8 @@ diff --git a/session_archivers/mod.py b/session_archivers/mod.py
 
 
 def self_test() -> None:
+    if not __debug__:
+        sys.exit('diff_coverage self-test needs its asserts: run it without -O')
     added = added_lines(SELF_TEST_DIFF)
     assert added == {'session_archivers/new name.py': {3}, 'session_archivers/mod.py': {3, 4, 8}}, added
     added.update({'session_archivers/data.json': {1}, 'tests/test_x.py': {1}})
@@ -143,6 +145,10 @@ def self_test() -> None:
     assert 'Nothing was measured' in report and '- `session_archivers/mod.py`' in report and '%' not in report, report
     report = render({'m.py': {**dict.fromkeys(range(1, 2000), 1), 2000: 0}}, {'m.py': set(range(1, 2001))})
     assert '**99.9%**' in report, report
+    report = render(measured, {'README.md': {1}})
+    assert report == ('### Coverage of this change\n\nNo executable line was added under `session_archivers/`, '
+                      'the only code the coverage job measures.\n'), report
+    assert _ranges([9, 4, 3, 7, 5]) == '3-5, 7, 9', _ranges([9, 4, 3, 7, 5])
     line = '<line number="{}" hits="{}"/>'
     for bad in ('<coverage/>', '<coverage><class filename="m.py"><lines/></class></coverage>',
                 f'<report><class filename="m.py">{line.format(1, 1)}</class></report>',

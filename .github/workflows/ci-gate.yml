@@ -126,9 +126,15 @@ jobs:
           path: ${{ runner.temp }}/coverage-xml
 
       - name: Report the coverage of the lines this pull request adds
+        env:
+          SESSION_ARCHIVERS_TESTS_RESULT: ${{ needs.tests.result }}
         run: |
           artifact="$RUNNER_TEMP/coverage-xml"
           if [ ! -d "$artifact" ] || [ -z "$(ls -A "$artifact")" ]; then
+            if [ "$SESSION_ARCHIVERS_TESTS_RESULT" = success ]; then
+              echo "The tests leg succeeded, so it uploaded coverage-xml, yet this run holds none." >&2
+              exit 1
+            fi
             echo "The tests leg uploaded no coverage XML, so there is no patch coverage to report." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -174,6 +180,9 @@ jobs:
         env:
           SESSION_ARCHIVERS_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 .github/scripts/commit_scopes.py
+
+      - name: Self-test the patch coverage reporter
+        run: python3 .github/scripts/diff_coverage.py --self-test
 
       - name: Fold the leg results into one verdict
         env:

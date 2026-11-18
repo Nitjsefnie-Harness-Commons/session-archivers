@@ -76,8 +76,12 @@ def self_test() -> None:
     for text, want in (('name: lint\non:\n  push:\n', 'lint'),
                        ('---\n# c\n\n"on": push\nname: ci gate\r\njobs: {}\r\n', 'ci gate'),
                        ("'on': [push]\nname: a.b_c-1\n", 'a.b_c-1'), ('Name: x\nname: y\n', 'y')):
-        if workflow_name('w.yml', text) != want:
-            raise AssertionError(f'{text!r}: read {workflow_name("w.yml", text)!r}, want {want!r}')
+        try:
+            got = workflow_name('w.yml', text)
+        except RuntimeError as error:
+            raise AssertionError(f'{text!r}: refused: {error}') from None
+        if got != want:
+            raise AssertionError(f'{text!r}: read {got!r}, want {want!r}')
     for text, refusal in (('on: push\n', 'has 0 top-level'), ('name: a\nname: b\n', 'has 2 top-level'),
                           ('"name": evil\nname: lint\n', 'is not `name: <value>`'),
                           ('name: "lint"\n', 'is not `name: <value>`'), ('name:  lint\n', 'is not `name: <value>`'),

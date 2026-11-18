@@ -57,6 +57,7 @@
 !/.github/scripts/
 !/.github/scripts/aggregate_gate.py
 !/.github/scripts/commit_scopes.py
+!/.github/scripts/diff_coverage.py
 !/.github/scripts/gate_base_freshness.py
 !/.github/scripts/ratchet_thresholds.py
 !/.github/size-baseline.json

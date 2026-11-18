@@ -107,6 +107,35 @@ jobs:
     permissions:
       contents: read
 
+  diff-coverage:
+    # Information only, so not in aggregate's needs; see the script's docstring.
+    needs: tests
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.tests.result == 'success' || needs.tests.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          # A pattern, not a name: no match downloads nothing and passes.
+          pattern: coverage-xml
+          path: ${{ runner.temp }}/coverage-xml
+
+      - name: Report the coverage of the lines this pull request adds
+        run: |
+          artifact="$RUNNER_TEMP/coverage-xml"
+          if [ ! -d "$artifact" ] || [ -z "$(ls -A "$artifact")" ]; then
+            echo "The tests leg uploaded no coverage XML, so there is no patch coverage to report." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git -c core.quotePath=false diff --text --no-ext-diff --no-textconv --find-renames --unified=0 HEAD^1 HEAD > "$RUNNER_TEMP/patch.diff"
+          python3 .github/scripts/diff_coverage.py --coverage "$artifact/coverage.xml" --diff "$RUNNER_TEMP/patch.diff" > "$RUNNER_TEMP/body.md"
+          cat "$RUNNER_TEMP/body.md" >> "$GITHUB_STEP_SUMMARY"
+
   aggregate:
     needs: [classify, tests, lint, types, audit, codeql, actionlint]
     if: ${{ always() }}

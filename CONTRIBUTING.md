@@ -131,9 +131,13 @@ python3 .github/scripts/diff_coverage.py --self-test
   key. If `main` moved past the measured commit, a change to any other path
   makes the measurement stale and drops the raise; a change to that file alone
   is merged three-way, so a hand raise in between survives, and a conflict
-  drops the raise. A push rejected while `main` stood still fails the run; one
-  rejected after `main` moved drops the raise. A dropped raise returns with
-  the next push that measures above the record. A hand raise is an edit to
+  drops the raise, as do a measured commit missing from `main`'s history and a
+  merge that is not valid JSON. A push rejected while `main` stood still fails
+  the run; one rejected after `main` moved drops the raise. A record that does
+  not raise `main`'s (a floor below it, a measured total not above it, another
+  `schema_version` or cell, a value that is not a finite number) fails the run
+  and pushes nothing. A dropped raise returns with the next push that measures
+  more than 1.5 points above the recorded total. A hand raise is an edit to
   that file; write tests rather than lower it to fit a result.
 - Four more workflows check a pull request and need GitHub to run, so they
   have no local command: `pr gate` (the description against

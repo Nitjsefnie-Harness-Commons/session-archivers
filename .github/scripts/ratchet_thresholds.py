@@ -3,13 +3,16 @@
 `stage` writes a raised record only for a total over RAISE_HYSTERESIS above
 the recorded one, so the raise commit stages nothing; the floor trails the
 total by CALIBRATION_GAP and never falls. No file means no raise, so bad
-input exits 1.
+input exits 1. `--self-test` checks those rules on inline fixtures;
+ci-gate.yml's aggregate job runs it, as no suite under tests/ covers this
+script.
 """
 import argparse
 from decimal import Decimal, InvalidOperation
 import json
 from pathlib import Path
 import sys
+import tempfile
 from typing import Any
 
 CALIBRATION_GAP = Decimal('1.5')
@@ -60,15 +63,49 @@ def stage(path: Path, measured_text: str, out_dir: Path) -> None:
     print(f'Staged: floor {floor} -> {python["floor"]}, measured {last} -> {measured}.')
 
 
+def self_test() -> None:
+    if not __debug__:
+        sys.exit('ratchet_thresholds self-test needs its asserts: run it without -O')
+    with tempfile.TemporaryDirectory() as scratch:
+        record = Path(scratch, 'ci-thresholds.json')
+
+        def staged(floor: float, last: float, measured: str) -> dict[str, Any] | None:
+            python = {'floor': floor, 'measured': last, 'cell': 'ubuntu-latest'}
+            record.write_text(json.dumps({'schema_version': 1, 'coverage': {'python': python}}), encoding='utf-8')
+            out = Path(scratch, measured)
+            stage(record, measured, out)
+            raised = out / 'ci-thresholds.json'
+            return json.loads(raised.read_text(encoding='utf-8'))['coverage']['python'] if raised.exists() else None
+
+        assert staged(94, 95.7, '97.2') is None, 'a total exactly RAISE_HYSTERESIS above staged a raise'
+        result = staged(94, 95.7, '97.21')
+        assert result == {'floor': 95.71, 'measured': 97.21, 'cell': 'ubuntu-latest'}, result
+        result = staged(96, 95.7, '97.3')
+        assert result == {'floor': 96, 'measured': 97.3, 'cell': 'ubuntu-latest'}, result
+    for bad in ('NaN', 'sNaN', 'Infinity', '-Infinity'):
+        try:
+            percent(bad, '--measured')
+        except ValueError:
+            continue
+        raise AssertionError(f'accepted {bad}')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest='command', required=True)
+    parser.add_argument('--self-test', action='store_true', help='check the floor rules on inline fixtures')
+    commands = parser.add_subparsers(dest='command')
     commands.add_parser('floor').add_argument('thresholds', type=Path)
     staging = commands.add_parser('stage')
     staging.add_argument('thresholds', type=Path)
     staging.add_argument('--measured', required=True)
     staging.add_argument('--out-dir', required=True, type=Path)
     args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        print('ratchet_thresholds self-test passed')
+        return 0
+    if args.command is None:
+        parser.error('a command (floor or stage) or --self-test is required')
     try:
         if args.command == 'floor':
             print(load(args.thresholds)[1])

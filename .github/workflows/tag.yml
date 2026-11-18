@@ -8,8 +8,8 @@ name: tag
 # after bumping __version__, and a forgotten tag means a version bump that
 # never ships.
 #
-# So this composes with it rather than replacing it: on each push to main the
-# gates run on, it tags __version__ if that tag does not exist yet, and then
+# So this composes with it rather than replacing it: on each push to main that
+# is not docs-only, it tags __version__ if that tag does not exist yet, and then
 # STARTS release.yml by hand. That last part is not belt-and-braces: a `v*`
 # tag pushed with the built-in GITHUB_TOKEN does not trigger release.yml at
 # all. GitHub suppresses workflow runs from token-authored events so a
@@ -280,7 +280,7 @@ jobs:
     # leaves a released version on main. GitHub's docs do not say whether
     # a failed job's outputs reach its dependents; if not, `pushed` reads
     # empty, this job is skipped as under success(), and main keeps the
-    # released version until the next push the gates run on bumps it.
+    # released version until the next push that is not docs-only bumps it.
     if: ${{ !cancelled() && (needs.tag.outputs.pushed == 'true' || needs.tag.outputs.free == 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

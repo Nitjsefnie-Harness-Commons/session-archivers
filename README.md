@@ -235,7 +235,8 @@ version. If a check on that commit fails, `tag` refuses it; a later push
 that changes more than documentation and leaves `__version__` as it was
 is tagged in its place once its own checks pass. If the `.dev0` push is
 refused because `main` moved, re-run the failed `bump` job; the next push
-the gates run on, while `main` still carries `X.Y.Z`, makes it too.
+that changes more than documentation, while `main` still carries `X.Y.Z`,
+makes it too.
 
 **Actions are hash-pinned**, with the version in a trailing comment. Do
 not "tidy" one back to `@v4`: a tag is a moving pointer, and these jobs

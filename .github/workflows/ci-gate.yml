@@ -184,6 +184,9 @@ jobs:
       - name: Self-test the patch coverage reporter
         run: python3 .github/scripts/diff_coverage.py --self-test
 
+      - name: Self-test the coverage floor ratchet
+        run: python3 .github/scripts/ratchet_thresholds.py --self-test
+
       - name: Fold the leg results into one verdict
         env:
           SESSION_ARCHIVERS_NEEDS_JSON: ${{ toJSON(needs) }}

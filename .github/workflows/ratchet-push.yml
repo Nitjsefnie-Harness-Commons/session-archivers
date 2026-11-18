@@ -98,7 +98,9 @@ jobs:
           git -C "$repo" fetch --quiet origin main
           fetched="$(git -C "$repo" rev-parse FETCH_HEAD)"
           current="$RUNNER_TEMP/current-thresholds.json"
-          git -C "$repo" show "$fetched:$file" > "$current"
+          main_json="$RUNNER_TEMP/main-thresholds.json"
+          git -C "$repo" show "$fetched:$file" > "$main_json"
+          cp "$main_json" "$current"
           if [ "$fetched" = "$base" ]; then
             cp "$staged" "$current"
           else
@@ -109,16 +111,39 @@ jobs:
             git merge-file "$current" "$RUNNER_TEMP/base-thresholds.json" "$staged" \
               || drop "the raise conflicts with a change main made to $file"
           fi
-          python3 -I -c 'import json, sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$current" \
-            || drop "the merged $file is not valid JSON"
+          if cmp -s "$current" "$main_json"; then
+            echo "main already holds this raise: nothing to commit."
+            exit 0
+          fi
+          # The coverage job's code wrote the staged file and no one reviews this commit.
+          rc=0
+          python3 -I - "$current" "$main_json" <<'PY' || rc=$?
+          import json
+          import math
+          import sys
+
+          try:
+              with open(sys.argv[1], encoding='utf-8') as merged:
+                  new = json.load(merged)
+          except ValueError:
+              sys.exit(3)
+          with open(sys.argv[2], encoding='utf-8') as fetched:
+              old = json.load(fetched)
+          new_py, old_py = new['coverage']['python'], old['coverage']['python']
+          for key in ('floor', 'measured'):
+              if type(new_py[key]) not in (int, float) or not math.isfinite(new_py[key]):
+                  sys.exit(f'refusing: coverage.python.{key} is not a finite number')
+          if new['schema_version'] != old['schema_version'] or new_py['cell'] != old_py['cell']:
+              sys.exit("refusing: schema_version or coverage.python.cell differs from main's")
+          if new_py['floor'] < old_py['floor'] or new_py['measured'] <= old_py['measured']:
+              sys.exit("refusing: the floor is below main's or the measured total is not above it")
+          PY
+          [ "$rc" != 3 ] || drop "the merged $file is not valid JSON"
+          [ "$rc" = 0 ] || exit 1
           git -C "$repo" read-tree "$fetched"
           blob="$(git -C "$repo" hash-object -w "$current")"
           git -C "$repo" update-index --cacheinfo "100644,$blob,$file"
           tree="$(git -C "$repo" write-tree)"
-          if [ "$tree" = "$(git -C "$repo" rev-parse "$fetched^{tree}")" ]; then
-            echo "main already holds this raise: nothing to commit."
-            exit 0
-          fi
           commit="$(git -C "$repo" -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit-tree "$tree" -p "$fetched" -m 'chore(ratchet): raise the coverage floor (automated)')"

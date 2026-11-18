@@ -198,14 +198,14 @@ workflow actions).
 `__version__` in `session_archivers/__init__.py` is the release. Between
 releases `main` carries a development version, `X.Y.Z.devN`, which the `tag`
 workflow never tags. The commit that sets it to a release version `X.Y.Z` is
-the release: `tag` waits for the required gates on that commit (named in
-`tag.yml` and in the CI table of [README.md](README.md)), refuses to tag if any
-check on it has failed, pushes `vX.Y.Z` and starts the `release` workflow, which
-builds the wheel from that tag and publishes it with its `SHA256SUMS` and a
+the release: `tag` waits for `ci gate`'s `aggregate` check on that commit (see
+the CI table of [README.md](README.md)), refuses to tag if any check on it has
+failed, pushes `vX.Y.Z` and starts the `release` workflow, which builds the
+wheel from that tag and publishes it with its `SHA256SUMS` and a
 build-provenance attestation. `tag` then commits `X.Y.(Z+1).dev0` to `main`.
-A later push that cancels that commit's gates before they finish is tagged in
-its place, if it left `__version__` as it was. Say in the pull request when a
-change warrants a bump; the maintainer decides which part.
+If it refused, a later push that changes more than documentation and leaves
+`__version__` as it was is tagged in its place once its checks pass. Say in the
+pull request when a change warrants a bump; the maintainer decides which part.
 
 ## Issues
 

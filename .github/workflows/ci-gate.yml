@@ -187,6 +187,12 @@ jobs:
       - name: Self-test the coverage floor ratchet
         run: python3 .github/scripts/ratchet_thresholds.py --self-test
 
+      - name: Self-test the commit scope check
+        run: python3 .github/scripts/commit_scopes.py --self-test
+
+      - name: Self-test the fold
+        run: python3 .github/scripts/aggregate_gate.py --self-test
+
       - name: Fold the leg results into one verdict
         env:
           SESSION_ARCHIVERS_NEEDS_JSON: ${{ toJSON(needs) }}

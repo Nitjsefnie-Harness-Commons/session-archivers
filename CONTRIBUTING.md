@@ -72,10 +72,12 @@ export SESSION_ARCHIVERS_HEAD_SHA="$(git rev-parse HEAD)"
 python3 .github/scripts/gate_base_freshness.py
 python3 .github/scripts/commit_scopes.py
 
-# ci gate, aggregate job: the patch coverage reporter's parsers and the
-# coverage floor ratchet's rules on inline fixtures
+# ci gate, aggregate job: the patch coverage reporter's parsers, the coverage
+# floor ratchet's rules, the commit scope check and the fold on inline fixtures
 python3 .github/scripts/diff_coverage.py --self-test
 python3 .github/scripts/ratchet_thresholds.py --self-test
+python3 .github/scripts/commit_scopes.py --self-test
+python3 .github/scripts/aggregate_gate.py --self-test
 ```
 
 - `ci gate` calls `tests`, `lint`, `types`, `audit`, `codeql` and `actionlint`

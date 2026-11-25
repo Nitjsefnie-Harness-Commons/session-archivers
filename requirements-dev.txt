@@ -79,9 +79,9 @@ nodeenv==1.12.0 \
     --hash=sha256:4ea7f88339310afebc3253f2c7a91b94bacf97d73a36a5c108962abdfaca501e \
     --hash=sha256:80644d65c10cc2be12e3e4b54b3367ff288c7ad24ae75c2dcc65454fc7449d4d
     # via pyright
-platformdirs==4.14.6 \
-    --hash=sha256:2fabae4441a016e262d87ef88f677c0d76c1999227e068eba2e8a81cf6fb4b30 \
-    --hash=sha256:57d7bbea7c41e86b2063409934372f3ea3a396ec5e4bad595c6cb50cbc5449bd
+platformdirs==4.14.8 \
+    --hash=sha256:1e34af590de4d978631b751eb2202f2fee4497537a17c1720b12fcf57b331392 \
+    --hash=sha256:96893d686e84e9e6f358a9ea41a8de544df66dbf2ba6cda250e7dc73acf85b9b
     # via pylint
 pycodestyle==2.14.0 \
     --hash=sha256:c4b5b517d278089ff9d0abdec919cd97262a3367449ea1c8b49b91529167b783 \
